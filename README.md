@@ -10,38 +10,40 @@ The database-free glue for multi-BungeeCord networks.
 
 For each BungeeCord server:
 
-1. Remove `cmd_alert` and `cmd_send` from the `modules.yml`.
-2. Remove the `cmd_alert.jar` and `cmd_send.jar` from the `modules/` folder.
-3. Move the `MultiBungeeGlue.jar` into the `plugins/` folder.
-4. Restart BungeeCord.
-5. Edit the `plugins/MultiBungeeGlue/config.yml`.
-6. Restart BungeeCord again.
+1. Move the `MultiBungeeGlue.jar` into the `plugins/` folder.
+2. Restart BungeeCord.
+3. Edit the `plugins/MultiBungeeGlue/config.yml`.
+4. Restart BungeeCord again.
 
 ## Permissions
 
 Permission | Description
 -----------|-----------
-`multibungeeglue.command.alert` | Allows the player to execute `/alert`.
-`multibungeeglue.command.endall` | Allows the player to execute `/endall`.
-`multibungeeglue.command.lobby` | Allows the player to execute `/lobby` and `/hub`.
-`multibungeeglue.command.send` | Allows the player to execute `/send`.
+`multibungeeglue.command.alert` | Allows the player to execute `/malert`.
+`multibungeeglue.command.end` | Allows the player to execute `/mend`.
+`multibungeeglue.command.lobby` | Allows the player to execute `/lobby`.
+`multibungeeglue.command.send` | Allows the player to execute `/msend`.
 
 ## Commands
 
-### `/alert <message>`
+### `/malert <message>`
 
 Sends an alert to every player.
 
-### `/endall`
+You can also use `/alert` if the `cmd_alert` module is removed.
 
-Stops all BungeeCord servers. This is useful if you have a loop script to effectively restart them all in one command.
+### `/mend`
+
+Stops all BungeeCord servers (or restarts them if they're running inside a loop).
 
 ### `/lobby`
 
 **Alias:** `/hub`
 
-Connects the player to the lobby server as defined by `lobby` in the `config.yml`.
+Connects the player to the lobby server as defined by `lobbyServer` in the `config.yml`.
 
-### `/send <all|server|player> <target server>`
+### `/msend <all|server|player> <target server>`
 
 Sends every player, or everyone on `server`, or the player `player` to `target server`.
+
+You can also use `/send` if the `cmd_send` module is removed

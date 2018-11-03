@@ -57,13 +57,17 @@ public class MultiBungeeGlue extends Plugin implements Listener
 			}
 			final ConfigurationProvider configProvider = ConfigurationProvider.getProvider(YamlConfiguration.class);
 			config = configProvider.load(configFile);
-			if(!config.contains("lobby"))
+			if(!config.contains("lobbyServer"))
 			{
-				config.set("lobby", "lobby");
+				config.set("lobbyServer", "lobby");
 			}
-			if(!config.contains("port"))
+			if(!config.contains("overwriteOnlinePlayers"))
 			{
-				config.set("port", (short) 25389);
+				config.set("overwriteOnlinePlayers", true);
+			}
+			if(!config.contains("communicationPort"))
+			{
+				config.set("communicationPort", (short) 25389);
 			}
 			if(config.contains("otherBungees"))
 			{
@@ -112,11 +116,14 @@ public class MultiBungeeGlue extends Plugin implements Listener
 	@EventHandler
 	public void onProxyPing(ProxyPingEvent e)
 	{
-		final ServerPing.Players responsePlayers = e.getResponse().getPlayers();
-		responsePlayers.setSample(new ServerPing.PlayerInfo[]{});
-		synchronized(players)
+		if(config.getBoolean("overwriteOnlinePlayers"))
 		{
-			responsePlayers.setOnline(players.size());
+			final ServerPing.Players responsePlayers = e.getResponse().getPlayers();
+			responsePlayers.setSample(new ServerPing.PlayerInfo[]{});
+			synchronized(players)
+			{
+				responsePlayers.setOnline(players.size());
+			}
 		}
 	}
 
@@ -125,7 +132,7 @@ public class MultiBungeeGlue extends Plugin implements Listener
 	{
 		synchronized(MultiBungeeGlue.players)
 		{
-			MultiBungeeGlue.players.add(new GluedPlayer(e.getPlayer()));
+			new GluedPlayer(e.getPlayer());
 		}
 	}
 
@@ -317,7 +324,7 @@ class Connection extends Thread
 				}
 				else if(packet == Packet.ALERT)
 				{
-					ProxyServer.getInstance().broadcast(TextComponent.fromLegacyText("§c[Alert]§r " + readString(is)));
+					ProxyServer.getInstance().broadcast(TextComponent.fromLegacyText("§8[§4Alert§8]§r " + readString(is)));
 				}
 				else if(packet == Packet.GLUE_PLAYER)
 				{
@@ -325,16 +332,7 @@ class Connection extends Thread
 					String name = readString(is);
 					synchronized(MultiBungeeGlue.players)
 					{
-						final GluedPlayer p = GluedPlayer.get(uuid);
-						if(p != null)
-						{
-							if(p.isLocal())
-							{
-								p.getProxied().disconnect(TextComponent.fromLegacyText("You connected from a different location."));
-							}
-							MultiBungeeGlue.players.remove(p);
-						}
-						MultiBungeeGlue.players.add(new GluedPlayer(this.ip, uuid, name));
+						new GluedPlayer(this.ip, uuid, name);
 					}
 				}
 				else if(packet == Packet.UNGLUE_PLAYER)
@@ -407,7 +405,7 @@ class ConnectionListener extends Thread
 	ConnectionListener() throws IOException
 	{
 		super("ConnectionListener");
-		this.serverSocket = new ServerSocket(MultiBungeeGlue.config.getShort("port"));
+		this.serverSocket = new ServerSocket(MultiBungeeGlue.config.getShort("communicationPort"));
 		this.start();
 	}
 
@@ -485,7 +483,7 @@ class ConnectionMaintainer extends Thread
 					{
 						synchronized(MultiBungeeGlue.connections)
 						{
-							MultiBungeeGlue.connections.add(new Connection(ip, new Socket(ip, MultiBungeeGlue.config.getShort("port"))));
+							MultiBungeeGlue.connections.add(new Connection(ip, new Socket(ip, MultiBungeeGlue.config.getShort("communicationPort"))));
 						}
 					}
 					catch(IOException e)
@@ -590,6 +588,19 @@ class GluedPlayer
 		this.proxy = proxy;
 		this.uuid = uuid;
 		this.name = name;
+		synchronized(MultiBungeeGlue.players)
+		{
+			final GluedPlayer p = GluedPlayer.get(name);
+			if(p != null)
+			{
+				if(p.isLocal())
+				{
+					p.getProxied().disconnect(TextComponent.fromLegacyText("You connected from a different location."));
+				}
+				MultiBungeeGlue.players.remove(p);
+			}
+			MultiBungeeGlue.players.add(this);
+		}
 	}
 
 	void sendGlue(Connection c) throws IOException
@@ -669,7 +680,7 @@ class AlertCommand extends Command
 {
 	AlertCommand()
 	{
-		super("alert", "multibungeeglue.command.alert");
+		super("malert", "multibungeeglue.command.alert", "alert");
 	}
 
 	@Override
@@ -686,7 +697,7 @@ class AlertCommand extends Command
 				}
 			}
 			final String message = builder.toString();
-			ProxyServer.getInstance().broadcast(TextComponent.fromLegacyText("§c[Alert]§r " + message));
+			ProxyServer.getInstance().broadcast(TextComponent.fromLegacyText("§8[§4Alert§8]§r " + message));
 			synchronized(MultiBungeeGlue.connections)
 			{
 				for(Connection c : MultiBungeeGlue.connections)
@@ -715,7 +726,7 @@ class EndCommand extends Command
 {
 	EndCommand()
 	{
-		super("endall", "multibungeeglue.command.endall");
+		super("mend", "multibungeeglue.command.end");
 	}
 
 	@Override
@@ -753,16 +764,16 @@ class LobbyCommand extends Command
 		if(s instanceof ProxiedPlayer)
 		{
 			final ProxiedPlayer p = (ProxiedPlayer) s;
-			if(p.getServer().getInfo().getName().equals(MultiBungeeGlue.config.getString("lobby")))
+			if(p.getServer().getInfo().getName().equals(MultiBungeeGlue.config.getString("lobbyServer")))
 			{
 				p.sendMessage(new ComponentBuilder("You're already in the lobby.").color(ChatColor.RED).create());
 			}
 			else
 			{
-				final ServerInfo serverInfo = ProxyServer.getInstance().getServerInfo(MultiBungeeGlue.config.getString("lobby"));
+				final ServerInfo serverInfo = ProxyServer.getInstance().getServerInfo(MultiBungeeGlue.config.getString("lobbyServer"));
 				if(serverInfo == null)
 				{
-					s.sendMessage(new ComponentBuilder("MultiBungeeGlue is misconfigured — " + MultiBungeeGlue.config.getString("lobby") + " does not exist.").color(ChatColor.RED).create());
+					s.sendMessage(new ComponentBuilder("MultiBungeeGlue is misconfigured — " + MultiBungeeGlue.config.getString("lobbyServer") + " does not exist.").color(ChatColor.RED).create());
 				}
 				else
 				{
@@ -781,7 +792,7 @@ class SendCommand extends Command
 {
 	SendCommand()
 	{
-		super("send", "multibungeeglue.command.send");
+		super("msend", "multibungeeglue.command.send", "send");
 	}
 
 	@Override

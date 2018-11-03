@@ -8,6 +8,7 @@ import net.md_5.bungee.api.chat.ComponentBuilder;
 import net.md_5.bungee.api.chat.TextComponent;
 import net.md_5.bungee.api.config.ServerInfo;
 import net.md_5.bungee.api.connection.ProxiedPlayer;
+import net.md_5.bungee.api.event.LoginEvent;
 import net.md_5.bungee.api.event.PlayerDisconnectEvent;
 import net.md_5.bungee.api.event.PostLoginEvent;
 import net.md_5.bungee.api.event.ProxyPingEvent;
@@ -19,6 +20,8 @@ import net.md_5.bungee.config.ConfigurationProvider;
 import net.md_5.bungee.config.YamlConfiguration;
 import net.md_5.bungee.event.EventHandler;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -27,9 +30,11 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Collection;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.UUID;
 import java.util.logging.Level;
+import java.util.regex.Pattern;
 
 public class MultiBungeeGlue extends Plugin implements Listener
 {
@@ -37,8 +42,13 @@ public class MultiBungeeGlue extends Plugin implements Listener
 	static Configuration config;
 	static final ArrayList<Connection> connections = new ArrayList<>();
 	static final ArrayList<GluedPlayer> players = new ArrayList<>();
+	static final BroadcastConnection broadcaster = new BroadcastConnection();
+	private File configFile;
 	private ConnectionListener connectionListener;
 	private ConnectionMaintainer connectionMaintainer;
+	static final int protocolVersion = 1;
+	private static ConfigurationProvider configProvider;
+	final static HashMap<String, String> bannedPlayers = new HashMap<>();
 
 	@Override
 	public void onEnable()
@@ -50,36 +60,17 @@ public class MultiBungeeGlue extends Plugin implements Listener
 			{
 				throw new IOException("Failed to create " + dataFolder.getPath());
 			}
-			final File configFile = new File(dataFolder, "config.yml");
+			configFile = new File(dataFolder, "config.yml");
 			if(!configFile.exists() && !configFile.createNewFile())
 			{
 				throw new IOException("Failed to create " + configFile.getPath());
 			}
-			final ConfigurationProvider configProvider = ConfigurationProvider.getProvider(YamlConfiguration.class);
+			configProvider = ConfigurationProvider.getProvider(YamlConfiguration.class);
 			config = configProvider.load(configFile);
-			if(!config.contains("lobbyServer"))
-			{
-				config.set("lobbyServer", "lobby");
-			}
-			if(!config.contains("overwriteOnlinePlayers"))
-			{
-				config.set("overwriteOnlinePlayers", true);
-			}
-			if(!config.contains("communicationPort"))
-			{
-				config.set("communicationPort", (short) 25389);
-			}
+			final boolean configured;
 			if(config.contains("otherBungees"))
 			{
-				configProvider.save(config, configFile);
-				instance = this;
-				connectionListener = new ConnectionListener();
-				connectionMaintainer = new ConnectionMaintainer();
-				getProxy().getPluginManager().registerListener(this, this);
-				getProxy().getPluginManager().registerCommand(this, new AlertCommand());
-				getProxy().getPluginManager().registerCommand(this, new EndCommand());
-				getProxy().getPluginManager().registerCommand(this, new LobbyCommand());
-				getProxy().getPluginManager().registerCommand(this, new SendCommand());
+				configured = true;
 			}
 			else
 			{
@@ -87,7 +78,55 @@ public class MultiBungeeGlue extends Plugin implements Listener
 				otherBungees.add("1.2.3.4");
 				otherBungees.add("1:2:3::4");
 				config.set("otherBungees", otherBungees);
-				configProvider.save(config, configFile);
+				configured = false;
+			}
+			if(!config.contains("commands.lobbyServer"))
+			{
+				config.set("commands.lobbyServer", "lobby");
+			}
+			if(!config.contains("commands.aliasBan"))
+			{
+				config.set("commands.aliasBan", false);
+			}
+			if(!config.contains("communication.port"))
+			{
+				config.set("communication.port", (short) 25389);
+			}
+			if(!config.contains("communication.sharedSecret"))
+			{
+				config.set("communication.sharedSecret", "");
+			}
+			if(!config.contains("motd.overwriteOnlinePlayers"))
+			{
+				config.set("motd.overwriteOnlinePlayers", true);
+			}
+			if(config.contains("bannedPlayers"))
+			{
+				for(String uuid : config.getSection("bannedPlayers").getKeys())
+				{
+					bannedPlayers.put(uuid, config.getString("bannedPlayers." + uuid));
+				}
+			}
+			else
+			{
+				config.set("bannedPlayers", new HashMap<String, String>());
+			}
+			// TODO: IP Bans
+			configProvider.save(config, configFile);
+			if(configured)
+			{
+				instance = this;
+				connectionListener = new ConnectionListener();
+				connectionMaintainer = new ConnectionMaintainer();
+				getProxy().getPluginManager().registerListener(this, this);
+				getProxy().getPluginManager().registerCommand(this, new AlertCommand());
+				getProxy().getPluginManager().registerCommand(this, new BanCommand(config.getBoolean("commands.aliasBan")));
+				getProxy().getPluginManager().registerCommand(this, new EndCommand());
+				getProxy().getPluginManager().registerCommand(this, new LobbyCommand());
+				getProxy().getPluginManager().registerCommand(this, new SendCommand());
+			}
+			else
+			{
 				getLogger().log(Level.WARNING, "Please configure MultiBungeeGlue and then restart.");
 			}
 		}
@@ -97,11 +136,22 @@ public class MultiBungeeGlue extends Plugin implements Listener
 		}
 	}
 
+	void saveConfig() throws IOException
+	{
+		configProvider.save(config, configFile);
+	}
+
 	@Override
 	public void onDisable()
 	{
-		connectionListener.interrupt();
-		connectionMaintainer.interrupt();
+		if(connectionListener != null && connectionListener.isAlive())
+		{
+			connectionListener.interrupt();
+		}
+		if(connectionMaintainer != null && connectionMaintainer.isAlive())
+		{
+			connectionMaintainer.interrupt();
+		}
 		final ArrayList<Connection> _connections;
 		synchronized(connections)
 		{
@@ -116,13 +166,27 @@ public class MultiBungeeGlue extends Plugin implements Listener
 	@EventHandler
 	public void onProxyPing(ProxyPingEvent e)
 	{
-		if(config.getBoolean("overwriteOnlinePlayers"))
+		if(config.getBoolean("motd.overwriteOnlinePlayers"))
 		{
 			final ServerPing.Players responsePlayers = e.getResponse().getPlayers();
 			responsePlayers.setSample(new ServerPing.PlayerInfo[]{});
 			synchronized(players)
 			{
 				responsePlayers.setOnline(players.size());
+			}
+		}
+	}
+
+	@EventHandler
+	public void onLogin(LoginEvent e)
+	{
+		synchronized(MultiBungeeGlue.bannedPlayers)
+		{
+			final String banReason = MultiBungeeGlue.bannedPlayers.get(Pattern.compile("^([A-Fa-f0-9]{8})([A-Fa-f0-9]{4})([A-Fa-f0-9]{4})([A-Fa-f0-9]{4})([A-Fa-f0-9]{12})$").matcher(e.getLoginResult().getId()).replaceAll("$1-$2-$3-$4-$5"));
+			if(banReason != null)
+			{
+				e.setCancelled(true);
+				e.setCancelReason(TextComponent.fromLegacyText("§4You are banned from this server: " + banReason));
 			}
 		}
 	}
@@ -154,25 +218,55 @@ class Connection extends Thread
 {
 	final String ip;
 	private final Socket socket;
-	private final OutputStream os;
+	final OutputStream os;
+	boolean authorized = false;
+
+	Connection()
+	{
+		this.ip = "";
+		this.socket = null;
+		this.os = new ByteArrayOutputStream();
+	}
 
 	Connection(Socket socket) throws IOException
 	{
-		this(socket.getRemoteSocketAddress().toString().substring(1).split(":")[0], socket);
+		this(socket.getRemoteSocketAddress().toString().substring(1).split(":")[0], socket, false);
 	}
 
 	Connection(String ip, Socket socket) throws IOException
+	{
+		this(ip, socket, true);
+	}
+
+	private Connection(String ip, Socket socket, boolean authorize) throws IOException
 	{
 		this.ip = ip;
 		this.socket = socket;
 		this.os = socket.getOutputStream();
 		this.start();
+		if(authorize)
+		{
+			this.writeInt(MultiBungeeGlue.protocolVersion);
+			this.writeString(MultiBungeeGlue.config.getString("communication.sharedSecret"));
+			this.flush();
+			this.authorized = true;
+		}
 		synchronized(MultiBungeeGlue.players)
 		{
 			for(GluedPlayer p : MultiBungeeGlue.players)
 			{
 				p.sendGlue(this);
 			}
+		}
+		synchronized(MultiBungeeGlue.bannedPlayers)
+		{
+			this.writeByte((byte) Packet.SYNC_BANNED_PLAYERS.ordinal());
+			this.writeInt(MultiBungeeGlue.bannedPlayers.size());
+			for(String uuid : MultiBungeeGlue.bannedPlayers.keySet())
+			{
+				this.writeUUID(UUID.fromString(uuid));
+			}
+			this.flush();
 		}
 	}
 
@@ -312,77 +406,22 @@ class Connection extends Thread
 			final InputStream is = this.socket.getInputStream();
 			do
 			{
-				final int packetId = is.read();
-				if(packetId == -1)
+				if(authorized)
 				{
-					break;
-				}
-				final Packet packet = Packet.fromOrdinal(packetId);
-				if(packet == Packet.END)
-				{
-					ProxyServer.getInstance().stop();
-				}
-				else if(packet == Packet.ALERT)
-				{
-					ProxyServer.getInstance().broadcast(TextComponent.fromLegacyText("§8[§4Alert§8]§r " + readString(is)));
-				}
-				else if(packet == Packet.GLUE_PLAYER)
-				{
-					UUID uuid = readUUID(is);
-					String name = readString(is);
-					synchronized(MultiBungeeGlue.players)
+					if(!handlePacket(is))
 					{
-						new GluedPlayer(this.ip, uuid, name);
+						break;
 					}
 				}
-				else if(packet == Packet.UNGLUE_PLAYER)
+				else if(readInt(is) == MultiBungeeGlue.protocolVersion && readString(is).equals(MultiBungeeGlue.config.getString("communication.sharedSecret")))
 				{
-					synchronized(MultiBungeeGlue.players)
-					{
-						MultiBungeeGlue.players.remove(GluedPlayer.get(readUUID(is)));
-					}
-				}
-				else if(packet == Packet.SEND_ALL)
-				{
-					final ServerInfo serverInfo = ProxyServer.getInstance().getServerInfo(readString(is));
-					if(serverInfo != null)
-					{
-						for(ProxiedPlayer p : ProxyServer.getInstance().getPlayers())
-						{
-							if(!p.getServer().getInfo().equals(serverInfo))
-							{
-								p.connect(serverInfo);
-							}
-						}
-					}
-				}
-				else if(packet == Packet.SEND_SERVER)
-				{
-					final String fromServer = readString(is);
-					final ServerInfo serverInfo = ProxyServer.getInstance().getServerInfo(readString(is));
-					if(serverInfo != null)
-					{
-						for(ProxiedPlayer p : ProxyServer.getInstance().getPlayers())
-						{
-							if(p.getServer().getInfo().getName().equals(fromServer) && !p.getServer().getInfo().equals(serverInfo))
-							{
-								p.connect(serverInfo);
-							}
-						}
-					}
-				}
-				else if(packet == Packet.SEND_PLAYER)
-				{
-					final ProxiedPlayer p = ProxyServer.getInstance().getPlayer(readString(is));
-					final ServerInfo serverInfo = ProxyServer.getInstance().getServerInfo(readString(is));
-					if(p != null && serverInfo != null && !p.getServer().getInfo().equals(serverInfo))
-					{
-						p.connect(serverInfo);
-					}
+					authorized = true;
+					MultiBungeeGlue.instance.getLogger().log(Level.INFO, ip + " successfully authorized.");
 				}
 				else
 				{
-					MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Received unknown packet: " + packetId);
+					MultiBungeeGlue.instance.getLogger().log(Level.INFO, ip + " failed to authorize — closed connection.");
+					break;
 				}
 			}
 			while(!this.isInterrupted());
@@ -396,6 +435,165 @@ class Connection extends Thread
 			this.close(true);
 		}
 	}
+
+	boolean handlePacket(final InputStream is) throws IOException
+	{
+		final int packetId = is.read();
+		if(packetId == -1)
+		{
+			return false;
+		}
+		final Packet packet = Packet.fromOrdinal(packetId);
+		if(packet == Packet.UNKNOWN)
+		{
+			MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Received unknown packet ID: " + packetId);
+		}
+		else
+		{
+			MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Received " + packet + " packet.");
+			if(packet == Packet.END)
+			{
+				ProxyServer.getInstance().stop();
+			}
+			else if(packet == Packet.ALERT)
+			{
+				ProxyServer.getInstance().broadcast(TextComponent.fromLegacyText("§8[§4Alert§8]§r " + readString(is)));
+			}
+			else if(packet == Packet.GLUE_PLAYER)
+			{
+				UUID uuid = readUUID(is);
+				String name = readString(is);
+				synchronized(MultiBungeeGlue.players)
+				{
+					new GluedPlayer(this.ip, uuid, name);
+				}
+			}
+			else if(packet == Packet.UNGLUE_PLAYER)
+			{
+				synchronized(MultiBungeeGlue.players)
+				{
+					MultiBungeeGlue.players.remove(GluedPlayer.get(readUUID(is)));
+				}
+			}
+			else if(packet == Packet.SEND_ALL)
+			{
+				final ServerInfo serverInfo = ProxyServer.getInstance().getServerInfo(readString(is));
+				if(serverInfo != null)
+				{
+					for(ProxiedPlayer p : ProxyServer.getInstance().getPlayers())
+					{
+						if(!p.getServer().getInfo().equals(serverInfo))
+						{
+							p.connect(serverInfo);
+						}
+					}
+				}
+			}
+			else if(packet == Packet.SEND_SERVER)
+			{
+				final String fromServer = readString(is);
+				final ServerInfo serverInfo = ProxyServer.getInstance().getServerInfo(readString(is));
+				if(serverInfo != null)
+				{
+					for(ProxiedPlayer p : ProxyServer.getInstance().getPlayers())
+					{
+						if(p.getServer().getInfo().getName().equals(fromServer) && !p.getServer().getInfo().equals(serverInfo))
+						{
+							p.connect(serverInfo);
+						}
+					}
+				}
+			}
+			else if(packet == Packet.SEND_PLAYER)
+			{
+				final ProxiedPlayer p = ProxyServer.getInstance().getPlayer(readString(is));
+				final ServerInfo serverInfo = ProxyServer.getInstance().getServerInfo(readString(is));
+				if(p != null && serverInfo != null && !p.getServer().getInfo().equals(serverInfo))
+				{
+					p.connect(serverInfo);
+				}
+			}
+			else if(packet == Packet.SYNC_BANNED_PLAYERS)
+			{
+				final ArrayList<String> remoteBannedPlayers = new ArrayList<>();
+				for(int i = readInt(is); i > 0; i--)
+				{
+					remoteBannedPlayers.add(readUUID(is).toString());
+				}
+				synchronized(MultiBungeeGlue.bannedPlayers)
+				{
+					for(Map.Entry<String, String> ban : MultiBungeeGlue.bannedPlayers.entrySet())
+					{
+						if(!remoteBannedPlayers.contains(ban.getKey()))
+						{
+							writeByte((byte) Packet.BAN_PLAYER.ordinal());
+							writeUUID(UUID.fromString(ban.getKey()));
+							writeString(ban.getValue());
+							flush();
+						}
+					}
+				}
+			}
+			else if(packet == Packet.BAN_PLAYER)
+			{
+				final UUID u = readUUID(is);
+				final GluedPlayer p = GluedPlayer.get(u);
+				final String reason = readString(is);
+				if(p != null && p.isLocal())
+				{
+					p.getProxied().disconnect(TextComponent.fromLegacyText("§4You have been banned from this server: " + reason));
+				}
+				synchronized(MultiBungeeGlue.bannedPlayers)
+				{
+					MultiBungeeGlue.bannedPlayers.put(u.toString(), reason);
+					MultiBungeeGlue.config.set("bannedPlayers", MultiBungeeGlue.bannedPlayers);
+				}
+				MultiBungeeGlue.instance.saveConfig();
+			}
+		}
+		return true;
+	}
+}
+
+class BroadcastConnection extends Connection
+{
+	BroadcastConnection()
+	{
+		super();
+	}
+
+	@Override
+	void flush()
+	{
+		final byte[] bytes = ((ByteArrayOutputStream) os).toByteArray();
+		((ByteArrayOutputStream) os).reset();
+		try
+		{
+			handlePacket(new ByteArrayInputStream(bytes));
+		}
+		catch(IOException e)
+		{
+			e.printStackTrace();
+		}
+		synchronized(MultiBungeeGlue.connections)
+		{
+			for(Connection c : MultiBungeeGlue.connections)
+			{
+				if(c.authorized)
+				{
+					try
+					{
+						c.os.write(bytes);
+						c.flush();
+					}
+					catch(IOException e)
+					{
+						e.printStackTrace();
+					}
+				}
+			}
+		}
+	}
 }
 
 class ConnectionListener extends Thread
@@ -405,7 +603,7 @@ class ConnectionListener extends Thread
 	ConnectionListener() throws IOException
 	{
 		super("ConnectionListener");
-		this.serverSocket = new ServerSocket(MultiBungeeGlue.config.getShort("communicationPort"));
+		this.serverSocket = new ServerSocket(MultiBungeeGlue.config.getShort("communication.port"));
 		this.start();
 	}
 
@@ -418,7 +616,7 @@ class ConnectionListener extends Thread
 			try
 			{
 				Connection connection = new Connection(serverSocket.accept());
-				if(MultiBungeeGlue.config.getList("otherBungees").contains(connection.ip))
+				if(MultiBungeeGlue.config.getStringList("otherBungees").contains(connection.ip))
 				{
 					MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Accepted connection from " + connection.ip);
 					synchronized(MultiBungeeGlue.connections)
@@ -467,8 +665,7 @@ class ConnectionMaintainer extends Thread
 			do
 			{
 
-				//noinspection unchecked
-				final ArrayList<String> missingPeers = new ArrayList<>((Collection<? extends String>) MultiBungeeGlue.config.getList("otherBungees"));
+				final ArrayList<String> missingPeers = new ArrayList<>(MultiBungeeGlue.config.getStringList("otherBungees"));
 				synchronized(MultiBungeeGlue.connections)
 				{
 					for(Connection c : MultiBungeeGlue.connections)
@@ -483,7 +680,7 @@ class ConnectionMaintainer extends Thread
 					{
 						synchronized(MultiBungeeGlue.connections)
 						{
-							MultiBungeeGlue.connections.add(new Connection(ip, new Socket(ip, MultiBungeeGlue.config.getShort("communicationPort"))));
+							MultiBungeeGlue.connections.add(new Connection(ip, new Socket(ip, MultiBungeeGlue.config.getShort("communication.port"))));
 						}
 					}
 					catch(IOException e)
@@ -536,14 +733,16 @@ class ConnectionMaintainer extends Thread
 
 enum Packet
 {
-	UNKNOWN,
 	END,
 	ALERT,
 	GLUE_PLAYER,
 	UNGLUE_PLAYER,
 	SEND_ALL,
 	SEND_SERVER,
-	SEND_PLAYER;
+	SEND_PLAYER,
+	SYNC_BANNED_PLAYERS,
+	BAN_PLAYER,
+	UNKNOWN;
 
 	public static Packet fromOrdinal(int o)
 	{
@@ -561,7 +760,7 @@ enum Packet
 class GluedPlayer
 {
 	final String proxy;
-	private final UUID uuid;
+	final UUID uuid;
 	private final String name;
 
 	GluedPlayer(ProxiedPlayer player)
@@ -676,6 +875,8 @@ class GluedPlayer
 	}
 }
 
+// Commands
+
 class AlertCommand extends Command
 {
 	AlertCommand()
@@ -697,27 +898,76 @@ class AlertCommand extends Command
 				}
 			}
 			final String message = builder.toString();
-			ProxyServer.getInstance().broadcast(TextComponent.fromLegacyText("§8[§4Alert§8]§r " + message));
-			synchronized(MultiBungeeGlue.connections)
+			try
 			{
-				for(Connection c : MultiBungeeGlue.connections)
+				MultiBungeeGlue.broadcaster.writeByte((byte) Packet.ALERT.ordinal());
+				MultiBungeeGlue.broadcaster.writeString(message);
+				MultiBungeeGlue.broadcaster.flush();
+			}
+			catch(IOException e)
+			{
+				e.printStackTrace();
+			}
+		}
+		else
+		{
+			s.sendMessage(new ComponentBuilder("Syntax: /malert <message>").color(ChatColor.RED).create());
+		}
+	}
+}
+
+class BanCommand extends Command
+{
+	BanCommand(boolean aliasBan)
+	{
+		super("mban", "multibungeeglue.command.ban", aliasBan ? new String[]{"ban"} : new String[0]);
+	}
+
+	@Override
+	public void execute(CommandSender s, String[] args)
+	{
+		if(args.length > 0)
+		{
+			final GluedPlayer p = GluedPlayer.get(args[0]);
+			if(p == null)
+			{
+				s.sendMessage(new ComponentBuilder("Couldn't find " + args[0]).color(ChatColor.RED).create());
+			}
+			else
+			{
+				final String reason;
+				if(args.length > 1)
 				{
-					try
+					final StringBuilder builder = new StringBuilder(args[1]);
+					if(args.length > 2)
 					{
-						c.writeByte((byte) Packet.ALERT.ordinal());
-						c.writeString(message);
-						c.flush();
+						for(int i = 2; i < args.length; i++)
+						{
+							builder.append(" ").append(args[i]);
+						}
 					}
-					catch(IOException e)
-					{
-						e.printStackTrace();
-					}
+					reason = builder.toString();
+				}
+				else
+				{
+					reason = "Banned by an operator.";
+				}
+				try
+				{
+					MultiBungeeGlue.broadcaster.writeByte((byte) Packet.BAN_PLAYER.ordinal());
+					MultiBungeeGlue.broadcaster.writeUUID(p.uuid);
+					MultiBungeeGlue.broadcaster.writeString(reason);
+					MultiBungeeGlue.broadcaster.flush();
+				}
+				catch(IOException e)
+				{
+					e.printStackTrace();
 				}
 			}
 		}
 		else
 		{
-			s.sendMessage(new ComponentBuilder("Syntax: /alert <message>").color(ChatColor.RED).create());
+			s.sendMessage(new ComponentBuilder("Syntax: /mban <player> [reason]").color(ChatColor.RED).create());
 		}
 	}
 }
@@ -764,16 +1014,16 @@ class LobbyCommand extends Command
 		if(s instanceof ProxiedPlayer)
 		{
 			final ProxiedPlayer p = (ProxiedPlayer) s;
-			if(p.getServer().getInfo().getName().equals(MultiBungeeGlue.config.getString("lobbyServer")))
+			if(p.getServer().getInfo().getName().equals(MultiBungeeGlue.config.getString("commands.lobbyServer")))
 			{
 				p.sendMessage(new ComponentBuilder("You're already in the lobby.").color(ChatColor.RED).create());
 			}
 			else
 			{
-				final ServerInfo serverInfo = ProxyServer.getInstance().getServerInfo(MultiBungeeGlue.config.getString("lobbyServer"));
+				final ServerInfo serverInfo = ProxyServer.getInstance().getServerInfo(MultiBungeeGlue.config.getString("commands.lobbyServer"));
 				if(serverInfo == null)
 				{
-					s.sendMessage(new ComponentBuilder("MultiBungeeGlue is misconfigured — " + MultiBungeeGlue.config.getString("lobbyServer") + " does not exist.").color(ChatColor.RED).create());
+					s.sendMessage(new ComponentBuilder("MultiBungeeGlue is misconfigured — " + MultiBungeeGlue.config.getString("commands.lobbyServer") + " does not exist.").color(ChatColor.RED).create());
 				}
 				else
 				{
@@ -807,22 +1057,15 @@ class SendCommand extends Command
 			}
 			else if(args[0].equalsIgnoreCase("all"))
 			{
-				for(Connection c : MultiBungeeGlue.connections)
+				try
 				{
-					try
-					{
-						c.writeByte((byte) Packet.SEND_ALL.ordinal());
-						c.writeString(args[1]);
-						c.flush();
-					}
-					catch(IOException e)
-					{
-						e.printStackTrace();
-					}
+					MultiBungeeGlue.broadcaster.writeByte((byte) Packet.SEND_ALL.ordinal());
+					MultiBungeeGlue.broadcaster.writeString(args[1]);
+					MultiBungeeGlue.broadcaster.flush();
 				}
-				for(ProxiedPlayer p : ProxyServer.getInstance().getPlayers())
+				catch(IOException e)
 				{
-					p.connect(targetServerInfo);
+					e.printStackTrace();
 				}
 			}
 			else
@@ -830,26 +1073,16 @@ class SendCommand extends Command
 				final ServerInfo serverInfo = ProxyServer.getInstance().getServerInfo(args[0]);
 				if(serverInfo != null)
 				{
-					for(Connection c : MultiBungeeGlue.connections)
+					try
 					{
-						try
-						{
-							c.writeByte((byte) Packet.SEND_SERVER.ordinal());
-							c.writeString(args[0]);
-							c.writeString(args[1]);
-							c.flush();
-						}
-						catch(IOException e)
-						{
-							e.printStackTrace();
-						}
+						MultiBungeeGlue.broadcaster.writeByte((byte) Packet.SEND_SERVER.ordinal());
+						MultiBungeeGlue.broadcaster.writeString(args[0]);
+						MultiBungeeGlue.broadcaster.writeString(args[1]);
+						MultiBungeeGlue.broadcaster.flush();
 					}
-					for(ProxiedPlayer p : ProxyServer.getInstance().getPlayers())
+					catch(IOException e)
 					{
-						if(p.getServer().getInfo().equals(serverInfo))
-						{
-							p.connect(targetServerInfo);
-						}
+						e.printStackTrace();
 					}
 				}
 				else
@@ -865,16 +1098,19 @@ class SendCommand extends Command
 						{
 							for(Connection c : MultiBungeeGlue.connections)
 							{
-								try
+								if(c.ip.equals(p.proxy))
 								{
-									c.writeByte((byte) Packet.SEND_PLAYER.ordinal());
-									c.writeString(args[0]);
-									c.writeString(args[1]);
-									c.flush();
-								}
-								catch(IOException e)
-								{
-									e.printStackTrace();
+									try
+									{
+										c.writeByte((byte) Packet.SEND_PLAYER.ordinal());
+										c.writeString(args[0]);
+										c.writeString(args[1]);
+										c.flush();
+									}
+									catch(IOException e)
+									{
+										e.printStackTrace();
+									}
 								}
 							}
 						}
@@ -888,7 +1124,7 @@ class SendCommand extends Command
 		}
 		else
 		{
-			s.sendMessage(new ComponentBuilder("Syntax: /send <all|server|player> <target server>").color(ChatColor.RED).create());
+			s.sendMessage(new ComponentBuilder("Syntax: /msend <all|server|player> <target server>").color(ChatColor.RED).create());
 		}
 	}
 }

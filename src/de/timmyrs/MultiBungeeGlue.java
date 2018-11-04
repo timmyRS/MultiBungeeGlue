@@ -46,7 +46,6 @@ public class MultiBungeeGlue extends Plugin implements Listener
 	private File configFile;
 	private ConnectionListener connectionListener;
 	private ConnectionMaintainer connectionMaintainer;
-	static final int protocolVersion = 1;
 	private static ConfigurationProvider configProvider;
 	final static HashMap<String, String> bannedPlayers = new HashMap<>();
 
@@ -111,7 +110,6 @@ public class MultiBungeeGlue extends Plugin implements Listener
 			{
 				config.set("bannedPlayers", new HashMap<String, String>());
 			}
-			// TODO: IP Bans
 			configProvider.save(config, configFile);
 			if(configured)
 			{
@@ -119,11 +117,12 @@ public class MultiBungeeGlue extends Plugin implements Listener
 				connectionListener = new ConnectionListener();
 				connectionMaintainer = new ConnectionMaintainer();
 				getProxy().getPluginManager().registerListener(this, this);
-				getProxy().getPluginManager().registerCommand(this, new AlertCommand());
-				getProxy().getPluginManager().registerCommand(this, new BanCommand(config.getBoolean("commands.aliasBan")));
-				getProxy().getPluginManager().registerCommand(this, new EndCommand());
 				getProxy().getPluginManager().registerCommand(this, new LobbyCommand());
+				getProxy().getPluginManager().registerCommand(this, new AlertCommand());
 				getProxy().getPluginManager().registerCommand(this, new SendCommand());
+				getProxy().getPluginManager().registerCommand(this, new BanCommand(config.getBoolean("commands.aliasBan")));
+				getProxy().getPluginManager().registerCommand(this, new UnbanCommand(config.getBoolean("commands.aliasBan")));
+				getProxy().getPluginManager().registerCommand(this, new EndCommand());
 			}
 			else
 			{
@@ -246,7 +245,7 @@ class Connection extends Thread
 		this.start();
 		if(authorize)
 		{
-			this.writeInt(MultiBungeeGlue.protocolVersion);
+			this.writeInt(Packet.values().length);
 			this.writeString(MultiBungeeGlue.config.getString("communication.sharedSecret"));
 			this.flush();
 			this.authorized = true;
@@ -413,7 +412,7 @@ class Connection extends Thread
 						break;
 					}
 				}
-				else if(readInt(is) == MultiBungeeGlue.protocolVersion && readString(is).equals(MultiBungeeGlue.config.getString("communication.sharedSecret")))
+				else if(readInt(is) == Packet.values().length && readString(is).equals(MultiBungeeGlue.config.getString("communication.sharedSecret")))
 				{
 					authorized = true;
 					MultiBungeeGlue.instance.getLogger().log(Level.INFO, ip + " successfully authorized.");
@@ -461,11 +460,12 @@ class Connection extends Thread
 			}
 			else if(packet == Packet.GLUE_PLAYER)
 			{
-				UUID uuid = readUUID(is);
-				String name = readString(is);
+				final UUID uuid = readUUID(is);
+				final String name = readString(is);
+				final boolean unbannable = is.read() == 1;
 				synchronized(MultiBungeeGlue.players)
 				{
-					new GluedPlayer(this.ip, uuid, name);
+					new GluedPlayer(this.ip, uuid, name, unbannable);
 				}
 			}
 			else if(packet == Packet.UNGLUE_PLAYER)
@@ -546,6 +546,15 @@ class Connection extends Thread
 				synchronized(MultiBungeeGlue.bannedPlayers)
 				{
 					MultiBungeeGlue.bannedPlayers.put(u.toString(), reason);
+					MultiBungeeGlue.config.set("bannedPlayers", MultiBungeeGlue.bannedPlayers);
+				}
+				MultiBungeeGlue.instance.saveConfig();
+			}
+			else if(packet == Packet.UNBAN_PLAYER)
+			{
+				synchronized(MultiBungeeGlue.bannedPlayers)
+				{
+					MultiBungeeGlue.bannedPlayers.remove(readString(is));
 					MultiBungeeGlue.config.set("bannedPlayers", MultiBungeeGlue.bannedPlayers);
 				}
 				MultiBungeeGlue.instance.saveConfig();
@@ -742,6 +751,7 @@ enum Packet
 	SEND_PLAYER,
 	SYNC_BANNED_PLAYERS,
 	BAN_PLAYER,
+	UNBAN_PLAYER,
 	UNKNOWN;
 
 	public static Packet fromOrdinal(int o)
@@ -761,11 +771,12 @@ class GluedPlayer
 {
 	final String proxy;
 	final UUID uuid;
-	private final String name;
+	final String name;
+	final boolean unbannable;
 
 	GluedPlayer(ProxiedPlayer player)
 	{
-		this("", player.getUniqueId(), player.getName());
+		this("", player.getUniqueId(), player.getName(), player.hasPermission("multibungeeglue.unbannable"));
 		synchronized(MultiBungeeGlue.connections)
 		{
 			for(Connection c : MultiBungeeGlue.connections)
@@ -782,11 +793,12 @@ class GluedPlayer
 		}
 	}
 
-	GluedPlayer(String proxy, UUID uuid, String name)
+	GluedPlayer(String proxy, UUID uuid, String name, boolean unbannable)
 	{
 		this.proxy = proxy;
 		this.uuid = uuid;
 		this.name = name;
+		this.unbannable = unbannable;
 		synchronized(MultiBungeeGlue.players)
 		{
 			final GluedPlayer p = GluedPlayer.get(name);
@@ -807,6 +819,7 @@ class GluedPlayer
 		c.writeByte((byte) Packet.GLUE_PLAYER.ordinal());
 		c.writeUUID(uuid);
 		c.writeString(name);
+		c.writeByte((byte) (unbannable ? 1 : 0));
 		c.flush();
 	}
 
@@ -850,7 +863,7 @@ class GluedPlayer
 		{
 			for(GluedPlayer p : MultiBungeeGlue.players)
 			{
-				if(p.name.equals(name))
+				if(p.name.equalsIgnoreCase(name))
 				{
 					return p;
 				}
@@ -876,6 +889,43 @@ class GluedPlayer
 }
 
 // Commands
+
+class LobbyCommand extends Command
+{
+	LobbyCommand()
+	{
+		super("lobby", "multibungeeglue.command.lobby", "hub");
+	}
+
+	@Override
+	public void execute(CommandSender s, String[] args)
+	{
+		if(s instanceof ProxiedPlayer)
+		{
+			final ProxiedPlayer p = (ProxiedPlayer) s;
+			if(p.getServer().getInfo().getName().equals(MultiBungeeGlue.config.getString("commands.lobbyServer")))
+			{
+				p.sendMessage(new ComponentBuilder("You're already in the lobby.").color(ChatColor.RED).create());
+			}
+			else
+			{
+				final ServerInfo serverInfo = ProxyServer.getInstance().getServerInfo(MultiBungeeGlue.config.getString("commands.lobbyServer"));
+				if(serverInfo == null)
+				{
+					s.sendMessage(new ComponentBuilder("MultiBungeeGlue is misconfigured — " + MultiBungeeGlue.config.getString("commands.lobbyServer") + " does not exist.").color(ChatColor.RED).create());
+				}
+				else
+				{
+					p.connect(serverInfo);
+				}
+			}
+		}
+		else
+		{
+			s.sendMessage(new ComponentBuilder("This command is only for players.").color(ChatColor.RED).create());
+		}
+	}
+}
 
 class AlertCommand extends Command
 {
@@ -912,128 +962,6 @@ class AlertCommand extends Command
 		else
 		{
 			s.sendMessage(new ComponentBuilder("Syntax: /malert <message>").color(ChatColor.RED).create());
-		}
-	}
-}
-
-class BanCommand extends Command
-{
-	BanCommand(boolean aliasBan)
-	{
-		super("mban", "multibungeeglue.command.ban", aliasBan ? new String[]{"ban"} : new String[0]);
-	}
-
-	@Override
-	public void execute(CommandSender s, String[] args)
-	{
-		if(args.length > 0)
-		{
-			final GluedPlayer p = GluedPlayer.get(args[0]);
-			if(p == null)
-			{
-				s.sendMessage(new ComponentBuilder("Couldn't find " + args[0]).color(ChatColor.RED).create());
-			}
-			else
-			{
-				final String reason;
-				if(args.length > 1)
-				{
-					final StringBuilder builder = new StringBuilder(args[1]);
-					if(args.length > 2)
-					{
-						for(int i = 2; i < args.length; i++)
-						{
-							builder.append(" ").append(args[i]);
-						}
-					}
-					reason = builder.toString();
-				}
-				else
-				{
-					reason = "Banned by an operator.";
-				}
-				try
-				{
-					MultiBungeeGlue.broadcaster.writeByte((byte) Packet.BAN_PLAYER.ordinal());
-					MultiBungeeGlue.broadcaster.writeUUID(p.uuid);
-					MultiBungeeGlue.broadcaster.writeString(reason);
-					MultiBungeeGlue.broadcaster.flush();
-				}
-				catch(IOException e)
-				{
-					e.printStackTrace();
-				}
-			}
-		}
-		else
-		{
-			s.sendMessage(new ComponentBuilder("Syntax: /mban <player> [reason]").color(ChatColor.RED).create());
-		}
-	}
-}
-
-class EndCommand extends Command
-{
-	EndCommand()
-	{
-		super("mend", "multibungeeglue.command.end");
-	}
-
-	@Override
-	public void execute(CommandSender s, String[] args)
-	{
-		synchronized(MultiBungeeGlue.connections)
-		{
-			for(Connection c : MultiBungeeGlue.connections)
-			{
-				try
-				{
-					c.writeByte((byte) Packet.END.ordinal());
-					c.flush();
-				}
-				catch(IOException e)
-				{
-					e.printStackTrace();
-				}
-			}
-		}
-		ProxyServer.getInstance().stop();
-	}
-}
-
-class LobbyCommand extends Command
-{
-	LobbyCommand()
-	{
-		super("lobby", "multibungeeglue.command.lobby", "hub");
-	}
-
-	@Override
-	public void execute(CommandSender s, String[] args)
-	{
-		if(s instanceof ProxiedPlayer)
-		{
-			final ProxiedPlayer p = (ProxiedPlayer) s;
-			if(p.getServer().getInfo().getName().equals(MultiBungeeGlue.config.getString("commands.lobbyServer")))
-			{
-				p.sendMessage(new ComponentBuilder("You're already in the lobby.").color(ChatColor.RED).create());
-			}
-			else
-			{
-				final ServerInfo serverInfo = ProxyServer.getInstance().getServerInfo(MultiBungeeGlue.config.getString("commands.lobbyServer"));
-				if(serverInfo == null)
-				{
-					s.sendMessage(new ComponentBuilder("MultiBungeeGlue is misconfigured — " + MultiBungeeGlue.config.getString("commands.lobbyServer") + " does not exist.").color(ChatColor.RED).create());
-				}
-				else
-				{
-					p.connect(serverInfo);
-				}
-			}
-		}
-		else
-		{
-			s.sendMessage(new ComponentBuilder("This command is only for players.").color(ChatColor.RED).create());
 		}
 	}
 }
@@ -1126,5 +1054,124 @@ class SendCommand extends Command
 		{
 			s.sendMessage(new ComponentBuilder("Syntax: /msend <all|server|player> <target server>").color(ChatColor.RED).create());
 		}
+	}
+}
+
+class BanCommand extends Command
+{
+	BanCommand(boolean aliasBan)
+	{
+		super("mban", "multibungeeglue.command.ban", aliasBan ? new String[]{"ban"} : new String[0]);
+	}
+
+	@Override
+	public void execute(CommandSender s, String[] args)
+	{
+		if(args.length > 0)
+		{
+			final GluedPlayer p = GluedPlayer.get(args[0]);
+			if(p == null)
+			{
+				s.sendMessage(new ComponentBuilder("Couldn't find " + args[0]).color(ChatColor.RED).create());
+			}
+			else if(p.unbannable)
+			{
+				s.sendMessage(new ComponentBuilder(p.name + " is unbannable.").color(ChatColor.RED).create());
+			}
+			else
+			{
+				final String reason;
+				if(args.length > 1)
+				{
+					final StringBuilder builder = new StringBuilder(args[1]);
+					if(args.length > 2)
+					{
+						for(int i = 2; i < args.length; i++)
+						{
+							builder.append(" ").append(args[i]);
+						}
+					}
+					reason = builder.toString();
+				}
+				else
+				{
+					reason = "Banned by an operator.";
+				}
+				try
+				{
+					MultiBungeeGlue.broadcaster.writeByte((byte) Packet.BAN_PLAYER.ordinal());
+					MultiBungeeGlue.broadcaster.writeUUID(p.uuid);
+					MultiBungeeGlue.broadcaster.writeString(reason);
+					MultiBungeeGlue.broadcaster.flush();
+				}
+				catch(IOException e)
+				{
+					e.printStackTrace();
+				}
+			}
+		}
+		else
+		{
+			s.sendMessage(new ComponentBuilder("Syntax: /mban <player> [reason]").color(ChatColor.RED).create());
+		}
+	}
+}
+
+class UnbanCommand extends Command
+{
+	UnbanCommand(boolean aliasBan)
+	{
+		super("munban", "multibungeeglue.command.unban", aliasBan ? new String[]{"mpardon", "pardon", "unban"} : new String[]{"mpardon"});
+	}
+
+	@Override
+	public void execute(CommandSender s, String[] args)
+	{
+		if(args.length > 0)
+		{
+			try
+			{
+				MultiBungeeGlue.broadcaster.writeByte((byte) Packet.UNBAN_PLAYER.ordinal());
+				MultiBungeeGlue.broadcaster.writeString(args[0]);
+				MultiBungeeGlue.broadcaster.flush();
+			}
+			catch(IOException e)
+			{
+				e.printStackTrace();
+			}
+		}
+		else
+		{
+			s.sendMessage(new ComponentBuilder("Syntax: /munban <uuid>").color(ChatColor.RED).create());
+		}
+	}
+}
+
+class EndCommand extends Command
+{
+	EndCommand()
+	{
+		super("mend", "multibungeeglue.command.end");
+	}
+
+	@Override
+	public void execute(CommandSender s, String[] args)
+	{
+		synchronized(MultiBungeeGlue.connections)
+		{
+			for(Connection c : MultiBungeeGlue.connections)
+			{
+				try
+				{
+					c.writeByte((byte) Packet.END.ordinal());
+					c.flush();
+				}
+				catch(IOException e)
+				{
+					e.printStackTrace();
+				}
+			}
+		}
+		ProxyServer.getInstance().stop();
 	}
 }

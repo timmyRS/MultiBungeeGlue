@@ -2,7 +2,7 @@
 
 The database-free glue for multi-BungeeCord networks.
 
-**Note:** MultiBungeeGlue is still in development, which means there is very verbose logging, including stack traces of irrelevant exceptions.
+**Note:** MultiBungeeGlue is still in development, which means there is verbose logging, irrelevant stacktraces, and constant changes.
 
 - [Download](https://raw.githubusercontent.com/timmyrs/MultiBungeeGlue/master/MultiBungeeGlue.jar)
 
@@ -20,6 +20,8 @@ For each BungeeCord server:
 Permission | Description
 -----------|-----------
 `multibungeeglue.command.lobby` | Allows the player to execute `/lobby`.
+`multibungeeglue.command.tell` | Allows the player to execute `/mtell` and `/mreply`.
+`multibungeeglue.command.list` | Allows the player to execute `/mlist`.
 `multibungeeglue.command.alert` | Allows the player to execute `/malert`.
 `multibungeeglue.command.send` | Allows the player to execute `/msend`.
 `multibungeeglue.command.ban` | Allows the player to execute `/mban`.
@@ -33,7 +35,29 @@ Permission | Description
 
 **Alias:** `/hub`
 
-Connects the player to the lobby server as defined by `commands.lobbyServer` in the `config.yml`.
+Connects the player to the lobby server as defined by `commands.lobbyServer` in the config.yml.
+
+### `/mtell`
+
+**Alias:** `/mwhisper`, `/mw`
+
+Sends a private message to a player on the network.
+
+You can also use `/tell`, `/whisper`, and `/w` if `commands.aliasTell` is set to `true` in the config.yml.
+
+### `/mreply`
+
+**Alias:** `/mr`
+
+Sends a private message to the last player a private message was sent to.
+
+You can also use `/reply` and `/r` if `commands.aliasTell` is set to `true` in the config.yml.
+
+### `/mlist`
+
+Lists every player.
+
+You can also use `/list` if `commands.aliasList` is set to `true` in the config.yml
 
 ### `/malert <message>`
 
@@ -52,7 +76,7 @@ You can also use `/send` if the `cmd_send` module is removed.
 
 Bans the given player with an optional reason.
 
-You can also use `/ban` if `commands.aliasBan` is set to `true` in the `config.yml`.
+You can also use `/ban` if `commands.aliasBan` is set to `true` in the config.yml.
 
 ### `/munban <uuid>`
 
@@ -60,7 +84,7 @@ You can also use `/ban` if `commands.aliasBan` is set to `true` in the `config.y
 
 Bans the given player with an optional reason.
 
-You can also use `/unban` and `/pardon` if `commands.aliasBan` is set to `true` in the `config.yml`.
+You can also use `/unban` and `/pardon` if `commands.aliasBan` is set to `true` in the config.yml.
 
 ### `/mend`
 

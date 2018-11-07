@@ -93,9 +93,13 @@ public class MultiBungeeGlue extends Plugin implements Listener
 			{
 				config.set("commands.aliasTell", true);
 			}
-			if(!config.contains("commands.tellFormat"))
+			if(!config.contains("commands.tellSent"))
 			{
-				config.set("commands.tellFormat", "§7%sender% whispers: %message%");
+				config.set("commands.tellSent", "§7You whisper to %recipient%: %message%");
+			}
+			if(!config.contains("commands.tellReceived"))
+			{
+				config.set("commands.tellReceived", "§7%sender% whispers to you: %message%");
 			}
 			if(!config.contains("commands.aliasList"))
 			{
@@ -276,7 +280,7 @@ class Connection extends Thread
 			final long random = new Random().nextLong();
 			this.authorized = false;
 			this.expectedHash = generateHash(time, random);
-			this.os.write(Packet.AUTH_REQUEST.ordinal());
+			this.os.write(0);
 			this.writeLong(time);
 			this.writeLong(random);
 			this.flush();
@@ -464,6 +468,19 @@ class Connection extends Thread
 			{
 				if(authorized)
 				{
+					if(expectedHash == null)
+					{
+						try
+						{
+							this.writeString(generateHash(readLong(is), readLong(is)));
+							this.flush();
+						}
+						catch(NoSuchAlgorithmException e)
+						{
+							e.printStackTrace();
+						}
+						break;
+					}
 					if(!handlePacket(is))
 					{
 						break;
@@ -508,22 +525,7 @@ class Connection extends Thread
 		else
 		{
 			MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Received " + packet + " packet from " + (ip.equals("") ? "myself" : ip));
-			if(packet == Packet.AUTH_REQUEST)
-			{
-				if(expectedHash == null)
-				{
-					try
-					{
-						this.writeString(generateHash(readLong(is), readLong(is)));
-						this.flush();
-					}
-					catch(NoSuchAlgorithmException e)
-					{
-						e.printStackTrace();
-					}
-				}
-			}
-			else if(packet == Packet.AUTH_SUCCESS)
+			if(packet == Packet.AUTH_SUCCESS)
 			{
 				expectedHash = "";
 				MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Successfully connected and authorized at " + ip);
@@ -864,7 +866,6 @@ class ConnectionMaintainer extends Thread
 enum Packet
 {
 	UNKNOWN,
-	AUTH_REQUEST,
 	AUTH_SUCCESS,
 	SYNC_BANNED_PLAYERS,
 	GLUE_PLAYER,
@@ -1106,9 +1107,11 @@ class CommandTell extends Command
 					builder.append(" ").append(args[i]);
 				}
 			}
+			final String message = builder.toString();
 			try
 			{
-				p.sendMessage(ChatMessageType.CHAT, MultiBungeeGlue.config.getString("commands.tellFormat").replace("%sender%", s.getName()).replace("%message%", builder.toString()));
+				s.sendMessage(new TextComponent(MultiBungeeGlue.config.getString("commands.tellSent").replace("%recipient%", p.name).replace("%message%", message)));
+				p.sendMessage(ChatMessageType.CHAT, MultiBungeeGlue.config.getString("commands.tellReceived").replace("%sender%", s.getName()).replace("%message%", message));
 				if(s instanceof ProxiedPlayer)
 				{
 					Objects.requireNonNull(GluedPlayer.get(((ProxiedPlayer) s).getUniqueId())).lastTold = p.name;
@@ -1163,9 +1166,11 @@ class CommandReply extends Command
 					builder.append(" ").append(args[i]);
 				}
 			}
+			final String message = builder.toString();
 			try
 			{
-				p.sendMessage(ChatMessageType.CHAT, MultiBungeeGlue.config.getString("commands.tellFormat").replace("%sender%", s.getName()).replace("%message%", builder.toString()));
+				s.sendMessage(new TextComponent(MultiBungeeGlue.config.getString("commands.tellSent").replace("%recipient%", p.name).replace("%message%", message)));
+				p.sendMessage(ChatMessageType.CHAT, MultiBungeeGlue.config.getString("commands.tellReceived").replace("%sender%", s.getName()).replace("%message%", message));
 			}
 			catch(IOException e)
 			{

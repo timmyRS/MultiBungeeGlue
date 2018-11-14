@@ -280,7 +280,6 @@ class Connection extends Thread
 			final long random = new Random().nextLong();
 			this.authorized = false;
 			this.expectedHash = generateHash(time, random);
-			this.os.write(0);
 			this.writeLong(time);
 			this.writeLong(random);
 			this.flush();
@@ -479,9 +478,9 @@ class Connection extends Thread
 						{
 							e.printStackTrace();
 						}
-						break;
+						expectedHash = "";
 					}
-					if(!handlePacket(is))
+					else if(!handlePacket(is))
 					{
 						break;
 					}
@@ -527,8 +526,7 @@ class Connection extends Thread
 			MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Received " + packet + " packet from " + (ip.equals("") ? "myself" : ip));
 			if(packet == Packet.AUTH_SUCCESS)
 			{
-				expectedHash = "";
-				MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Successfully connected and authorized at " + ip);
+				//MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Successfully connected and authorized at " + ip);
 				handlePostAuth();
 			}
 			else if(packet == Packet.SYNC_BANNED_PLAYERS)
@@ -754,14 +752,15 @@ class ConnectionListener extends Thread
 						{
 							if(c.ip.equals(connection.ip))
 							{
+								MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Denied connection from " + connection.ip + " because we already have a connection with them.");
 								connection.close(false);
 								break;
 							}
 						}
-					}
-					if(connection.isAlive())
-					{
-						MultiBungeeGlue.connections.add(connection);
+						if(connection.isAlive())
+						{
+							MultiBungeeGlue.connections.add(connection);
+						}
 					}
 				}
 				else

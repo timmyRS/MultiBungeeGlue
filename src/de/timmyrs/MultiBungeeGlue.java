@@ -21,6 +21,13 @@ import net.md_5.bungee.config.ConfigurationProvider;
 import net.md_5.bungee.config.YamlConfiguration;
 import net.md_5.bungee.event.EventHandler;
 
+import javax.crypto.Cipher;
+import javax.crypto.CipherInputStream;
+import javax.crypto.CipherOutputStream;
+import javax.crypto.NoSuchPaddingException;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -30,6 +37,8 @@ import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.security.InvalidAlgorithmParameterException;
+import java.security.InvalidKeyException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -248,9 +257,8 @@ class Connection extends Thread
 {
 	final String ip;
 	private final Socket socket;
-	final OutputStream os;
-	private String expectedHash = null;
-	boolean authorized = true;
+	private InputStream is;
+	OutputStream os;
 
 	Connection()
 	{
@@ -259,35 +267,31 @@ class Connection extends Thread
 		this.os = new ByteArrayOutputStream();
 	}
 
-	Connection(Socket socket) throws IOException, NoSuchAlgorithmException
+	Connection(Socket socket) throws IOException, NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException, InvalidAlgorithmParameterException
 	{
-		this(socket.getRemoteSocketAddress().toString().substring(1).split(":")[0], socket, true);
-	}
-
-	Connection(String ip, Socket socket) throws IOException, NoSuchAlgorithmException
-	{
-		this(ip, socket, false);
-	}
-
-	private Connection(String ip, Socket socket, boolean requestAuth) throws IOException, NoSuchAlgorithmException
-	{
-		this.ip = ip;
+		this.ip = socket.getRemoteSocketAddress().toString().substring(1).split(":")[0];
 		this.socket = socket;
+		this.is = socket.getInputStream();
 		this.os = socket.getOutputStream();
-		if(requestAuth)
-		{
-			final long time = System.currentTimeMillis();
-			final long random = new Random().nextLong();
-			this.authorized = false;
-			this.expectedHash = generateHash(time, random);
-			this.writeLong(time);
-			this.writeLong(random);
-			this.flush();
-		}
+		final long time = System.currentTimeMillis();
+		final long random = new Random().nextLong();
+		this.writeLong(time);
+		this.writeLong(random);
+		this.flush();
+		this.enableEncryption(time, random);
 		this.start();
 	}
 
-	private String generateHash(long time, long random) throws NoSuchAlgorithmException
+	Connection(String ip, Socket socket) throws IOException
+	{
+		this.ip = ip;
+		this.socket = socket;
+		this.is = socket.getInputStream();
+		this.os = socket.getOutputStream();
+		this.start();
+	}
+
+	private void enableEncryption(long time, long random) throws NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException, InvalidAlgorithmParameterException
 	{
 		final MessageDigest md = MessageDigest.getInstance("SHA-384");
 		for(int i = 7; i >= 0; i--)
@@ -300,13 +304,24 @@ class Connection extends Thread
 		md.update((byte) Packet.values().length);
 		if(MultiBungeeGlue.config.getBoolean("communication.requireSameProxy"))
 		{
-			md.update(MultiBungeeGlue.instance.getProxy().getVersion().getBytes(StandardCharsets.UTF_8));
+			md.update(MultiBungeeGlue.instance.getProxy().getVersion().getBytes());
 		}
-		md.update(MultiBungeeGlue.config.getString("communication.sharedSecret").getBytes(StandardCharsets.UTF_8));
-		return new String(md.digest(), StandardCharsets.UTF_8);
+		md.update(MultiBungeeGlue.config.getString("communication.sharedSecret").getBytes());
+		final byte[] hash = md.digest();
+		byte[] key = new byte[32];
+		System.arraycopy(hash, 0, key, 0, 32);
+		byte[] iv = new byte[16];
+		System.arraycopy(hash, 32, iv, 0, 16);
+		final SecretKey sharedKey = new SecretKeySpec(key, 0, key.length, "AES");
+		Cipher cipher = Cipher.getInstance("AES/CFB8/NoPadding");
+		cipher.init(Cipher.ENCRYPT_MODE, sharedKey, new IvParameterSpec(iv));
+		is = new CipherInputStream(is, cipher);
+		cipher = Cipher.getInstance("AES/CFB8/NoPadding");
+		cipher.init(Cipher.DECRYPT_MODE, sharedKey, new IvParameterSpec(iv));
+		os = new CipherOutputStream(os, cipher);
 	}
 
-	private void handlePostAuth() throws IOException
+	private void synchronize() throws IOException
 	{
 		synchronized(MultiBungeeGlue.players)
 		{
@@ -462,44 +477,25 @@ class Connection extends Thread
 	{
 		try
 		{
-			final InputStream is = this.socket.getInputStream();
 			do
 			{
-				if(authorized)
+				if(is instanceof CipherInputStream)
 				{
-					if(expectedHash == null)
-					{
-						try
-						{
-							this.writeString(generateHash(readLong(is), readLong(is)));
-							this.flush();
-						}
-						catch(NoSuchAlgorithmException e)
-						{
-							e.printStackTrace();
-						}
-						expectedHash = "";
-					}
-					else if(!handlePacket(is))
+					if(!handlePacket(is))
 					{
 						break;
 					}
-					continue;
 				}
-				if(!readString(is).equals(expectedHash))
+				else
 				{
-					MultiBungeeGlue.instance.getLogger().log(Level.INFO, ip + " failed to authorize. If this is one of your proxy's IPs, make sure they use the same version of MultiBungeeGlue and the `communication` section in the config.yml is equal.");
-					break;
+					enableEncryption(readLong(is), readLong(is));
+					this.os.write(Packet.ENCRYPTION_TEST.ordinal());
+					synchronize();
 				}
-				authorized = true;
-				MultiBungeeGlue.instance.getLogger().log(Level.INFO, ip + " has successfully connected and authorized.");
-				this.os.write(Packet.AUTH_SUCCESS.ordinal());
-				this.os.flush();
-				handlePostAuth();
 			}
 			while(!this.isInterrupted());
 		}
-		catch(IOException e)
+		catch(IOException | NoSuchAlgorithmException | NoSuchPaddingException | InvalidKeyException | InvalidAlgorithmParameterException e)
 		{
 			e.printStackTrace();
 		}
@@ -524,10 +520,9 @@ class Connection extends Thread
 		else
 		{
 			MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Received " + packet + " packet from " + (ip.equals("") ? "myself" : ip));
-			if(packet == Packet.AUTH_SUCCESS)
+			if(packet == Packet.ENCRYPTION_TEST)
 			{
-				//MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Successfully connected and authorized at " + ip);
-				handlePostAuth();
+				synchronize();
 			}
 			else if(packet == Packet.SYNC_BANNED_PLAYERS)
 			{
@@ -707,17 +702,14 @@ class BroadcastConnection extends Connection
 		{
 			for(Connection c : MultiBungeeGlue.connections)
 			{
-				if(c.authorized)
+				try
 				{
-					try
-					{
-						c.os.write(bytes);
-						c.flush();
-					}
-					catch(IOException e)
-					{
-						e.printStackTrace();
-					}
+					c.os.write(bytes);
+					c.flush();
+				}
+				catch(IOException e)
+				{
+					e.printStackTrace();
 				}
 			}
 		}
@@ -769,7 +761,7 @@ class ConnectionListener extends Thread
 					connection.close(false);
 				}
 			}
-			catch(IOException | NoSuchAlgorithmException e)
+			catch(IOException | NoSuchAlgorithmException | NoSuchPaddingException | InvalidKeyException | InvalidAlgorithmParameterException e)
 			{
 				e.printStackTrace();
 			}
@@ -814,7 +806,7 @@ class ConnectionMaintainer extends Thread
 							MultiBungeeGlue.connections.add(new Connection(ip, new Socket(ip, MultiBungeeGlue.config.getShort("communication.port"))));
 						}
 					}
-					catch(IOException | NoSuchAlgorithmException e)
+					catch(IOException e)
 					{
 						e.printStackTrace();
 					}
@@ -865,7 +857,7 @@ class ConnectionMaintainer extends Thread
 enum Packet
 {
 	UNKNOWN,
-	AUTH_SUCCESS,
+	ENCRYPTION_TEST,
 	SYNC_BANNED_PLAYERS,
 	GLUE_PLAYER,
 	UNGLUE_PLAYER,

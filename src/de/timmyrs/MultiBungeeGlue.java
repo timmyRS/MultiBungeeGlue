@@ -257,6 +257,7 @@ class Connection extends Thread
 {
 	final String ip;
 	private final Socket socket;
+	boolean workingEncryption = false;
 	private InputStream is;
 	OutputStream os;
 
@@ -488,9 +489,10 @@ class Connection extends Thread
 				}
 				else
 				{
-					enableEncryption(readLong(is), readLong(is));
+					this.enableEncryption(readLong(is), readLong(is));
 					this.os.write(Packet.ENCRYPTION_TEST.ordinal());
-					synchronize();
+					this.writeString("Can you read this?");
+					this.flush();
 				}
 			}
 			while(!this.isInterrupted());
@@ -513,18 +515,40 @@ class Connection extends Thread
 			return false;
 		}
 		final Packet packet = Packet.fromOrdinal(packetId);
-		if(packet == Packet.UNKNOWN)
+		if(!workingEncryption)
 		{
-			MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Received unknown packet (" + packetId + ") from " + (ip.equals("") ? "myself" : ip));
+			if(packet == Packet.ENCRYPTION_TEST)
+			{
+				if(readString(is).equals("Can you read this?"))
+				{
+					MultiBungeeGlue.instance.getLogger().log(Level.INFO, this.ip + " established an encrypted connection.");
+					this.workingEncryption = true;
+					this.os.write(Packet.ENCRYPTION_SUCCESS.ordinal());
+					this.synchronize();
+					return true;
+				}
+			}
+			else if(packet == Packet.ENCRYPTION_SUCCESS)
+			{
+				MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Established an encrypted connection to " + this.ip + ".");
+				this.workingEncryption = true;
+				this.synchronize();
+				return true;
+			}
+			MultiBungeeGlue.instance.getLogger().log(Level.INFO, this.ip + " failed to establish an encrypted connection. If this is one of your servers, make sure to update the `communication` section in the config.yml.");
+			return false;
 		}
 		else
 		{
-			MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Received " + packet + " packet from " + (ip.equals("") ? "myself" : ip));
-			if(packet == Packet.ENCRYPTION_TEST)
+			if(packet == Packet.UNKNOWN)
 			{
-				synchronize();
+				MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Received an unknown packet (" + packetId + ") from " + (ip.equals("") ? "myself" : ip));
 			}
-			else if(packet == Packet.SYNC_BANNED_PLAYERS)
+			else
+			{
+				MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Received " + packet + " packet from " + (ip.equals("") ? "myself" : ip));
+			}
+			if(packet == Packet.SYNC_BANNED_PLAYERS)
 			{
 				final ArrayList<String> remoteBannedPlayers = new ArrayList<>();
 				for(int i = readInt(is); i > 0; i--)
@@ -650,6 +674,10 @@ class Connection extends Thread
 			{
 				ProxyServer.getInstance().stop();
 			}
+			else
+			{
+				return false;
+			}
 		}
 		return true;
 	}
@@ -702,14 +730,17 @@ class BroadcastConnection extends Connection
 		{
 			for(Connection c : MultiBungeeGlue.connections)
 			{
-				try
+				if(c.workingEncryption)
 				{
-					c.os.write(bytes);
-					c.flush();
-				}
-				catch(IOException e)
-				{
-					e.printStackTrace();
+					try
+					{
+						c.os.write(bytes);
+						c.flush();
+					}
+					catch(IOException e)
+					{
+						e.printStackTrace();
+					}
 				}
 			}
 		}
@@ -744,8 +775,15 @@ class ConnectionListener extends Thread
 						{
 							if(c.ip.equals(connection.ip))
 							{
-								MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Denied connection from " + connection.ip + " because we already have a connection with them.");
-								connection.close(false);
+								if(c.workingEncryption)
+								{
+									MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Denied connection from " + connection.ip + " because we already have a connection with them.");
+									connection.close(true);
+								}
+								else
+								{
+									c.close(true);
+								}
 								break;
 							}
 						}
@@ -757,7 +795,7 @@ class ConnectionListener extends Thread
 				}
 				else
 				{
-					MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Denied connection from " + connection.ip + ". If this is one of your proxy's IPs, make sure to update the `otherBungees` section of the config.yml.");
+					MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Denied connection from " + connection.ip + ". If this is one of your servers, make sure to update the `otherBungees` section of the config.yml.");
 					connection.close(false);
 				}
 			}
@@ -858,6 +896,7 @@ enum Packet
 {
 	UNKNOWN,
 	ENCRYPTION_TEST,
+	ENCRYPTION_SUCCESS,
 	SYNC_BANNED_PLAYERS,
 	GLUE_PLAYER,
 	UNGLUE_PLAYER,
@@ -1187,13 +1226,20 @@ class CommandList extends Command
 	{
 		synchronized(MultiBungeeGlue.players)
 		{
-			if(MultiBungeeGlue.players.size() > 50)
+			if(MultiBungeeGlue.players.size() == 0 || MultiBungeeGlue.players.size() > 50)
 			{
 				s.sendMessage(new TextComponent("There are " + MultiBungeeGlue.players.size() + " players on this network."));
 			}
 			else
 			{
-				s.sendMessage(new TextComponent("There are " + MultiBungeeGlue.players.size() + " players on this network:"));
+				if(MultiBungeeGlue.players.size() == 1)
+				{
+					s.sendMessage(new TextComponent("There is 1 player on this network:"));
+				}
+				else
+				{
+					s.sendMessage(new TextComponent("There are " + MultiBungeeGlue.players.size() + " players on this network:"));
+				}
 				for(GluedPlayer p : MultiBungeeGlue.players)
 				{
 					s.sendMessage(new TextComponent(p.name));

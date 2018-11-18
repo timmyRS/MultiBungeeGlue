@@ -46,7 +46,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Random;
 import java.util.UUID;
 import java.util.logging.Level;
@@ -1195,7 +1194,8 @@ class CommandTell extends Command
 				c.flush();
 				if(s instanceof ProxiedPlayer)
 				{
-					Objects.requireNonNull(GluedPlayer.get(((ProxiedPlayer) s).getUniqueId())).lastTold = p.name;
+					//noinspection ConstantConditions
+					GluedPlayer.get(((ProxiedPlayer) s).getUniqueId()).lastTold = p.name;
 				}
 			}
 			catch(IOException e)
@@ -1227,7 +1227,8 @@ class CommandReply extends Command
 				s.sendMessage(new ComponentBuilder("Syntax: /" + (MultiBungeeGlue.config.getBoolean("commands.aliasTell") ? "" : "m") + "reply <message>").color(ChatColor.RED).create());
 				return;
 			}
-			final String lastTold = Objects.requireNonNull(GluedPlayer.get(((ProxiedPlayer) s).getUniqueId())).lastTold;
+			//noinspection ConstantConditions
+			final String lastTold = GluedPlayer.get(((ProxiedPlayer) s).getUniqueId()).lastTold;
 			if(lastTold == null)
 			{
 				s.sendMessage(new ComponentBuilder("You didn't message anyone recently. Use /" + (MultiBungeeGlue.config.getBoolean("commands.aliasTell") ? "" : "m") + "tell first.").color(ChatColor.RED).create());
@@ -1236,7 +1237,7 @@ class CommandReply extends Command
 			final GluedPlayer p = GluedPlayer.get(lastTold);
 			if(p == null)
 			{
-				s.sendMessage(new ComponentBuilder("Couldn't find " + args[0]).color(ChatColor.RED).create());
+				s.sendMessage(new ComponentBuilder(lastTold + " isn't online anymore.").color(ChatColor.RED).create());
 				return;
 			}
 			final StringBuilder builder = new StringBuilder(args[0]);

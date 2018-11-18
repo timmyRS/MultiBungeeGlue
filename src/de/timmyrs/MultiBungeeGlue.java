@@ -5,6 +5,7 @@ import net.md_5.bungee.api.ChatMessageType;
 import net.md_5.bungee.api.CommandSender;
 import net.md_5.bungee.api.ProxyServer;
 import net.md_5.bungee.api.ServerPing;
+import net.md_5.bungee.api.chat.BaseComponent;
 import net.md_5.bungee.api.chat.ComponentBuilder;
 import net.md_5.bungee.api.chat.TextComponent;
 import net.md_5.bungee.api.config.ServerInfo;
@@ -43,6 +44,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Random;
@@ -52,13 +54,17 @@ import java.util.regex.Pattern;
 
 public class MultiBungeeGlue extends Plugin implements Listener
 {
+	private final Pattern hypenlessUUIDPattern = Pattern.compile("^([A-Fa-f0-9]{8})([A-Fa-f0-9]{4})([A-Fa-f0-9]{4})([A-Fa-f0-9]{4})([A-Fa-f0-9]{12})$");
+	static final Pattern socketAddressPattern = Pattern.compile("^/([0-9.:\\[\\]]+):[0-9]{4,5}$");
 	static MultiBungeeGlue instance;
 	static Configuration config;
 	static final ArrayList<Connection> connections = new ArrayList<>();
 	static final ArrayList<GluedPlayer> players = new ArrayList<>();
+	static final ArrayList<String> otherBungees = new ArrayList<>();
 	static final BroadcastConnection broadcaster = new BroadcastConnection();
 	static final LoopbackConnection loopback = new LoopbackConnection();
 	private File configFile;
+	private boolean configured = false;
 	private ConnectionListener connectionListener;
 	private ConnectionMaintainer connectionMaintainer;
 	private static ConfigurationProvider configProvider;
@@ -81,18 +87,21 @@ public class MultiBungeeGlue extends Plugin implements Listener
 			}
 			configProvider = ConfigurationProvider.getProvider(YamlConfiguration.class);
 			config = configProvider.load(configFile);
-			final boolean configured;
-			if(config.contains("otherBungees"))
+			if(config.contains("bungees"))
 			{
-				configured = true;
+				final List<String> bungees = config.getStringList("bungees");
+				if(bungees.size() != 2 || !bungees.get(0).equals("1.2.3.4") || !bungees.get(1).equals("1:2:3::4"))
+				{
+					otherBungees.addAll(bungees);
+					configured = true;
+				}
 			}
 			else
 			{
-				final ArrayList<String> otherBungees = new ArrayList<>();
-				otherBungees.add("1.2.3.4");
-				otherBungees.add("1:2:3::4");
-				config.set("otherBungees", otherBungees);
-				configured = false;
+				final ArrayList<String> bungees = new ArrayList<>();
+				bungees.add("1.2.3.4");
+				bungees.add("1:2:3::4");
+				config.set("bungees", bungees);
 			}
 			if(!config.contains("commands.lobbyServer"))
 			{
@@ -151,7 +160,6 @@ public class MultiBungeeGlue extends Plugin implements Listener
 				instance = this;
 				connectionListener = new ConnectionListener();
 				connectionMaintainer = new ConnectionMaintainer();
-				getProxy().getPluginManager().registerListener(this, this);
 				getProxy().getPluginManager().registerCommand(this, new CommandLobby());
 				final boolean aliasTell = config.getBoolean("commands.aliasTell");
 				getProxy().getPluginManager().registerCommand(this, new CommandTell(aliasTell));
@@ -168,6 +176,7 @@ public class MultiBungeeGlue extends Plugin implements Listener
 			{
 				getLogger().log(Level.WARNING, "Please configure MultiBungeeGlue and then restart.");
 			}
+			getProxy().getPluginManager().registerListener(this, this);
 		}
 		catch(IOException e)
 		{
@@ -221,7 +230,7 @@ public class MultiBungeeGlue extends Plugin implements Listener
 	{
 		synchronized(MultiBungeeGlue.bannedPlayers)
 		{
-			final String banReason = MultiBungeeGlue.bannedPlayers.get(Pattern.compile("^([A-Fa-f0-9]{8})([A-Fa-f0-9]{4})([A-Fa-f0-9]{4})([A-Fa-f0-9]{4})([A-Fa-f0-9]{12})$").matcher(e.getLoginResult().getId()).replaceAll("$1-$2-$3-$4-$5"));
+			final String banReason = MultiBungeeGlue.bannedPlayers.get(hypenlessUUIDPattern.matcher(e.getLoginResult().getId()).replaceAll("$1-$2-$3-$4-$5"));
 			if(banReason != null)
 			{
 				e.setCancelled(true);
@@ -233,9 +242,31 @@ public class MultiBungeeGlue extends Plugin implements Listener
 	@EventHandler
 	public void onPostLogin(PostLoginEvent e)
 	{
-		synchronized(MultiBungeeGlue.players)
+		final ProxiedPlayer p = e.getPlayer();
+		new GluedPlayer(p);
+		if(p.hasPermission("multibungeeglue.sysadmin"))
 		{
-			new GluedPlayer(e.getPlayer());
+			if(configured)
+			{
+				synchronized(connections)
+				{
+					synchronized(otherBungees)
+					{
+						if(connections.size() != otherBungees.size())
+						{
+							p.sendMessage(ChatMessageType.SYSTEM, new ComponentBuilder("[MultiBungeeGlue] " + connections.size() + "/" + otherBungees.size() + " peers are connected.").color(ChatColor.YELLOW).create());
+						}
+						else
+						{
+							p.sendMessage(ChatMessageType.SYSTEM, new ComponentBuilder("[MultiBungeeGlue] Everything seems alright.").color(ChatColor.GREEN).create());
+						}
+					}
+				}
+			}
+			else
+			{
+				p.sendMessage(ChatMessageType.SYSTEM, new ComponentBuilder("Please configure MultiBungeeGlue and then restart.").color(ChatColor.RED).create());
+			}
 		}
 	}
 
@@ -251,44 +282,50 @@ public class MultiBungeeGlue extends Plugin implements Listener
 			}
 		}
 	}
+
+	static void broadcastToSysadmins(BaseComponent[] baseComponents)
+	{
+		for(ProxiedPlayer p : MultiBungeeGlue.instance.getProxy().getPlayers())
+		{
+			if(p.hasPermission("multibungeeglue.sysadmin"))
+			{
+				p.sendMessage(ChatMessageType.SYSTEM, baseComponents);
+			}
+		}
+	}
 }
 
 class Connection extends Thread
 {
 	final String ip;
+	byte workingEncryption = 0;
 	private final Socket socket;
-	boolean workingEncryption = false;
 	private InputStream is;
 	OutputStream os;
 
 	Connection()
 	{
 		this.ip = "";
+		this.workingEncryption = 2;
 		this.socket = null;
 		this.os = new ByteArrayOutputStream();
 	}
 
-	Connection(Socket socket) throws IOException, NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException, InvalidAlgorithmParameterException
-	{
-		this.ip = socket.getRemoteSocketAddress().toString().substring(1).split(":")[0];
-		this.socket = socket;
-		this.is = socket.getInputStream();
-		this.os = socket.getOutputStream();
-		final long time = System.currentTimeMillis();
-		final long random = new Random().nextLong();
-		this.writeLong(time);
-		this.writeLong(random);
-		this.flush();
-		this.enableEncryption(time, random);
-		this.start();
-	}
-
-	Connection(String ip, Socket socket) throws IOException
+	Connection(String ip, Socket socket, boolean initEncryption) throws IOException, NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException, InvalidAlgorithmParameterException
 	{
 		this.ip = ip;
 		this.socket = socket;
 		this.is = socket.getInputStream();
 		this.os = socket.getOutputStream();
+		if(initEncryption)
+		{
+			final long time = System.currentTimeMillis();
+			final long random = new Random().nextLong();
+			this.writeLong(time);
+			this.writeLong(random);
+			this.flush();
+			this.enableEncryption(time, random);
+		}
 		this.start();
 	}
 
@@ -302,7 +339,8 @@ class Connection extends Thread
 			time >>= 8;
 			random >>= 8;
 		}
-		md.update((byte) Packet.values().length);
+		md.update((byte) Packet.values().length); // Protocol Major Version
+		md.update((byte) 1); // Protocol Minor Version
 		if(MultiBungeeGlue.config.getBoolean("communication.requireSameProxy"))
 		{
 			md.update(MultiBungeeGlue.instance.getProxy().getVersion().getBytes());
@@ -324,16 +362,20 @@ class Connection extends Thread
 
 	private void synchronize() throws IOException
 	{
+		MultiBungeeGlue.broadcastToSysadmins(new ComponentBuilder("[MultiBungeeGlue] Established an encryption connection to " + ip).color(ChatColor.GREEN).create());
 		synchronized(MultiBungeeGlue.players)
 		{
 			for(GluedPlayer p : MultiBungeeGlue.players)
 			{
-				p.sendGlue(this);
+				if(p.isLocal())
+				{
+					p.sendGlue(this);
+				}
 			}
 		}
 		synchronized(MultiBungeeGlue.bannedPlayers)
 		{
-			this.os.write(Packet.SYNC_BANNED_PLAYERS.ordinal());
+			this.os.write(Packet.SYNCHRONIZE.ordinal());
 			this.writeInt(MultiBungeeGlue.bannedPlayers.size());
 			for(String uuid : MultiBungeeGlue.bannedPlayers.keySet())
 			{
@@ -490,6 +532,7 @@ class Connection extends Thread
 				else
 				{
 					this.enableEncryption(readLong(is), readLong(is));
+					this.workingEncryption = 1;
 					this.os.write(Packet.ENCRYPTION_TEST.ordinal());
 					this.writeString("Can you read this?");
 					this.flush();
@@ -504,6 +547,7 @@ class Connection extends Thread
 		finally
 		{
 			this.close(true);
+			MultiBungeeGlue.broadcastToSysadmins(new ComponentBuilder("[MultiBungeeGlue] Lost connection to " + ip).color(ChatColor.RED).create());
 		}
 	}
 
@@ -515,30 +559,7 @@ class Connection extends Thread
 			return false;
 		}
 		final Packet packet = Packet.fromOrdinal(packetId);
-		if(!workingEncryption)
-		{
-			if(packet == Packet.ENCRYPTION_TEST)
-			{
-				if(readString(is).equals("Can you read this?"))
-				{
-					MultiBungeeGlue.instance.getLogger().log(Level.INFO, this.ip + " established an encrypted connection.");
-					this.workingEncryption = true;
-					this.os.write(Packet.ENCRYPTION_SUCCESS.ordinal());
-					this.synchronize();
-					return true;
-				}
-			}
-			else if(packet == Packet.ENCRYPTION_SUCCESS)
-			{
-				MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Established an encrypted connection to " + this.ip + ".");
-				this.workingEncryption = true;
-				this.synchronize();
-				return true;
-			}
-			MultiBungeeGlue.instance.getLogger().log(Level.INFO, this.ip + " failed to establish an encrypted connection. If this is one of your servers, make sure to update the `communication` section in the config.yml.");
-			return false;
-		}
-		else
+		if(workingEncryption == 2)
 		{
 			if(packet == Packet.UNKNOWN)
 			{
@@ -548,7 +569,7 @@ class Connection extends Thread
 			{
 				MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Received " + packet + " packet from " + (ip.equals("") ? "myself" : ip));
 			}
-			if(packet == Packet.SYNC_BANNED_PLAYERS)
+			if(packet == Packet.SYNCHRONIZE)
 			{
 				final ArrayList<String> remoteBannedPlayers = new ArrayList<>();
 				for(int i = readInt(is); i > 0; i--)
@@ -586,21 +607,13 @@ class Connection extends Thread
 					MultiBungeeGlue.players.remove(GluedPlayer.get(readUUID(is)));
 				}
 			}
-			else if(packet == Packet.MESSAGE_PLAYER)
+			else if(packet == Packet.CHAT_MESSAGE_PLAYER)
 			{
 				final GluedPlayer p = GluedPlayer.get(readUUID(is));
-				final int rawMessageType = is.read();
 				final String rawMessage = readString(is);
 				if(p != null && p.isLocal())
 				{
-					for(ChatMessageType chatMessageType : ChatMessageType.values())
-					{
-						if(chatMessageType.ordinal() == rawMessageType)
-						{
-							p.getProxied().sendMessage(chatMessageType, new TextComponent(rawMessage));
-							break;
-						}
-					}
+					p.getProxied().sendMessage(ChatMessageType.CHAT, new TextComponent(rawMessage));
 				}
 			}
 			else if(packet == Packet.ALERT)
@@ -679,6 +692,32 @@ class Connection extends Thread
 				return false;
 			}
 		}
+		else
+		{
+			if(packet == Packet.ENCRYPTION_TEST)
+			{
+				if(this.workingEncryption == 0 && readString(is).equals("Can you read this?"))
+				{
+					MultiBungeeGlue.instance.getLogger().log(Level.INFO, this.ip + " established an encrypted connection.");
+					this.workingEncryption = 2;
+					this.os.write(Packet.ENCRYPTION_SUCCESS.ordinal());
+					this.synchronize();
+					return true;
+				}
+			}
+			else if(packet == Packet.ENCRYPTION_SUCCESS)
+			{
+				if(this.workingEncryption == 1)
+				{
+					MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Established an encrypted connection to " + this.ip + ".");
+					this.workingEncryption = 2;
+					this.synchronize();
+					return true;
+				}
+			}
+			MultiBungeeGlue.instance.getLogger().log(Level.INFO, this.ip + " failed to establish an encrypted connection. Make sure they're running the same version and the `communication` section in the config.yml is correct.");
+			return false;
+		}
 		return true;
 	}
 }
@@ -730,7 +769,7 @@ class BroadcastConnection extends Connection
 		{
 			for(Connection c : MultiBungeeGlue.connections)
 			{
-				if(c.workingEncryption)
+				if(c.workingEncryption == 2)
 				{
 					try
 					{
@@ -766,37 +805,52 @@ class ConnectionListener extends Thread
 		{
 			try
 			{
-				Connection connection = new Connection(serverSocket.accept());
-				if(MultiBungeeGlue.config.getStringList("otherBungees").contains(connection.ip))
+				final Socket socket = serverSocket.accept();
+				final String localIp = MultiBungeeGlue.socketAddressPattern.matcher(socket.getLocalSocketAddress().toString()).replaceAll("$1");
+				final String remoteIp = MultiBungeeGlue.socketAddressPattern.matcher(socket.getRemoteSocketAddress().toString()).replaceAll("$1");
+				if(localIp.equals(remoteIp))
 				{
-					synchronized(MultiBungeeGlue.connections)
+					synchronized(MultiBungeeGlue.otherBungees)
 					{
-						for(Connection c : MultiBungeeGlue.connections)
-						{
-							if(c.ip.equals(connection.ip))
-							{
-								if(c.workingEncryption)
-								{
-									MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Denied connection from " + connection.ip + " because we already have a connection with them.");
-									connection.close(true);
-								}
-								else
-								{
-									c.close(true);
-								}
-								break;
-							}
-						}
-						if(connection.isAlive())
-						{
-							MultiBungeeGlue.connections.add(connection);
-						}
+						MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Dropping " + remoteIp + ", assuming that's localhost.");
+						MultiBungeeGlue.otherBungees.remove(localIp);
 					}
+					socket.close();
 				}
 				else
 				{
-					MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Denied connection from " + connection.ip + ". If this is one of your servers, make sure to update the `otherBungees` section of the config.yml.");
-					connection.close(false);
+					final Connection connection = new Connection(remoteIp, socket, true);
+					if(MultiBungeeGlue.config.getStringList("bungees").contains(connection.ip))
+					{
+						synchronized(MultiBungeeGlue.connections)
+						{
+							for(Connection c : MultiBungeeGlue.connections)
+							{
+								if(c.ip.equals(connection.ip))
+								{
+									if(c.workingEncryption == 2)
+									{
+										MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Denied connection from " + connection.ip + " because we already have a connection with them.");
+										connection.close(true);
+									}
+									else
+									{
+										c.close(true);
+									}
+									break;
+								}
+							}
+							if(connection.isAlive())
+							{
+								MultiBungeeGlue.connections.add(connection);
+							}
+						}
+					}
+					else
+					{
+						MultiBungeeGlue.instance.getLogger().log(Level.INFO, "Denied connection from " + connection.ip + ". If this is one of your servers, make sure to update the `bungees` section of the config.yml.");
+						connection.close(false);
+					}
 				}
 			}
 			catch(IOException | NoSuchAlgorithmException | NoSuchPaddingException | InvalidKeyException | InvalidAlgorithmParameterException e)
@@ -825,8 +879,11 @@ class ConnectionMaintainer extends Thread
 			//noinspection InfiniteLoopStatement
 			do
 			{
-
-				final ArrayList<String> missingPeers = new ArrayList<>(MultiBungeeGlue.config.getStringList("otherBungees"));
+				final ArrayList<String> missingPeers;
+				synchronized(MultiBungeeGlue.otherBungees)
+				{
+					missingPeers = new ArrayList<>(MultiBungeeGlue.otherBungees);
+				}
 				synchronized(MultiBungeeGlue.connections)
 				{
 					for(Connection c : MultiBungeeGlue.connections)
@@ -841,10 +898,10 @@ class ConnectionMaintainer extends Thread
 					{
 						synchronized(MultiBungeeGlue.connections)
 						{
-							MultiBungeeGlue.connections.add(new Connection(ip, new Socket(ip, MultiBungeeGlue.config.getShort("communication.port"))));
+							MultiBungeeGlue.connections.add(new Connection(ip, new Socket(ip, MultiBungeeGlue.config.getShort("communication.port")), false));
 						}
 					}
-					catch(IOException e)
+					catch(IOException | NoSuchAlgorithmException | NoSuchPaddingException | InvalidKeyException | InvalidAlgorithmParameterException e)
 					{
 						e.printStackTrace();
 					}
@@ -897,10 +954,10 @@ enum Packet
 	UNKNOWN,
 	ENCRYPTION_TEST,
 	ENCRYPTION_SUCCESS,
-	SYNC_BANNED_PLAYERS,
+	SYNCHRONIZE,
 	GLUE_PLAYER,
 	UNGLUE_PLAYER,
-	MESSAGE_PLAYER,
+	CHAT_MESSAGE_PLAYER,
 	ALERT,
 	SEND_ALL,
 	SEND_SERVER,
@@ -962,7 +1019,7 @@ class GluedPlayer
 			{
 				if(p.isLocal())
 				{
-					p.getProxied().disconnect(TextComponent.fromLegacyText("You connected from a different location."));
+					p.getProxied().disconnect(new ComponentBuilder("You logged in from a different location.").color(ChatColor.RED).create());
 				}
 				MultiBungeeGlue.players.remove(p);
 			}
@@ -1029,16 +1086,6 @@ class GluedPlayer
 	ProxiedPlayer getProxied()
 	{
 		return ProxyServer.getInstance().getPlayer(uuid);
-	}
-
-	void sendMessage(ChatMessageType chatMessageType, String message) throws IOException
-	{
-		final Connection c = getConnection();
-		c.os.write(Packet.MESSAGE_PLAYER.ordinal());
-		c.writeUUID(uuid);
-		c.os.write(chatMessageType.ordinal());
-		c.writeString(message);
-		c.flush();
 	}
 
 	static GluedPlayer get(String name)
@@ -1141,7 +1188,11 @@ class CommandTell extends Command
 			try
 			{
 				s.sendMessage(new TextComponent(MultiBungeeGlue.config.getString("commands.tellSent").replace("%recipient%", p.name).replace("%message%", message)));
-				p.sendMessage(ChatMessageType.CHAT, MultiBungeeGlue.config.getString("commands.tellReceived").replace("%sender%", s.getName()).replace("%message%", message));
+				final Connection c = p.getConnection();
+				c.os.write(Packet.CHAT_MESSAGE_PLAYER.ordinal());
+				c.writeUUID(p.uuid);
+				c.writeString(MultiBungeeGlue.config.getString("commands.tellReceived").replace("%sender%", s.getName()).replace("%message%", message));
+				c.flush();
 				if(s instanceof ProxiedPlayer)
 				{
 					Objects.requireNonNull(GluedPlayer.get(((ProxiedPlayer) s).getUniqueId())).lastTold = p.name;
@@ -1154,7 +1205,7 @@ class CommandTell extends Command
 		}
 		else
 		{
-			s.sendMessage(new ComponentBuilder("Syntax: /mtell <player> <message>").color(ChatColor.RED).create());
+			s.sendMessage(new ComponentBuilder("Syntax: /" + (MultiBungeeGlue.config.getBoolean("commands.aliasTell") ? "" : "m") + "tell <player> <message>").color(ChatColor.RED).create());
 		}
 	}
 }
@@ -1173,13 +1224,13 @@ class CommandReply extends Command
 		{
 			if(args.length == 0)
 			{
-				s.sendMessage(new ComponentBuilder("Syntax: /mreply <message>").color(ChatColor.RED).create());
+				s.sendMessage(new ComponentBuilder("Syntax: /" + (MultiBungeeGlue.config.getBoolean("commands.aliasTell") ? "" : "m") + "reply <message>").color(ChatColor.RED).create());
 				return;
 			}
 			final String lastTold = Objects.requireNonNull(GluedPlayer.get(((ProxiedPlayer) s).getUniqueId())).lastTold;
 			if(lastTold == null)
 			{
-				s.sendMessage(new ComponentBuilder("You didn't message anyone recently. Use /mtell first.").color(ChatColor.RED).create());
+				s.sendMessage(new ComponentBuilder("You didn't message anyone recently. Use /" + (MultiBungeeGlue.config.getBoolean("commands.aliasTell") ? "" : "m") + "tell first.").color(ChatColor.RED).create());
 				return;
 			}
 			final GluedPlayer p = GluedPlayer.get(lastTold);
@@ -1200,7 +1251,11 @@ class CommandReply extends Command
 			try
 			{
 				s.sendMessage(new TextComponent(MultiBungeeGlue.config.getString("commands.tellSent").replace("%recipient%", p.name).replace("%message%", message)));
-				p.sendMessage(ChatMessageType.CHAT, MultiBungeeGlue.config.getString("commands.tellReceived").replace("%sender%", s.getName()).replace("%message%", message));
+				final Connection c = p.getConnection();
+				c.os.write(Packet.CHAT_MESSAGE_PLAYER.ordinal());
+				c.writeUUID(p.uuid);
+				c.writeString(MultiBungeeGlue.config.getString("commands.tellReceived").replace("%sender%", s.getName()).replace("%message%", message));
+				c.flush();
 			}
 			catch(IOException e)
 			{
@@ -1421,7 +1476,7 @@ class CommandBan extends Command
 		}
 		else
 		{
-			s.sendMessage(new ComponentBuilder("Syntax: /mban <player> [reason]").color(ChatColor.RED).create());
+			s.sendMessage(new ComponentBuilder("Syntax: /" + (MultiBungeeGlue.config.getBoolean("commands.aliasBan") ? "" : "m") + "ban <player> [reason]").color(ChatColor.RED).create());
 		}
 	}
 }
@@ -1451,7 +1506,7 @@ class CommandUnban extends Command
 		}
 		else
 		{
-			s.sendMessage(new ComponentBuilder("Syntax: /munban <uuid>").color(ChatColor.RED).create());
+			s.sendMessage(new ComponentBuilder("Syntax: /" + (MultiBungeeGlue.config.getBoolean("commands.aliasBan") ? "" : "m") + "unban <uuid>").color(ChatColor.RED).create());
 		}
 	}
 }

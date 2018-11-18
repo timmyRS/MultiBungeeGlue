@@ -28,6 +28,7 @@ Permission | Description
 `multibungeeglue.command.unban` | Allows the player to execute `/munban`.
 `multibungeeglue.unbannable` | Allows the player to not be banned.
 `multibungeeglue.command.end` | Allows the player to execute `/mend`.
+`multibungeeglue.sysadmin` | Notifies the player when something is wrong with the network.
 
 ## Commands
 

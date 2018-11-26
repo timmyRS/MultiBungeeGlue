@@ -2,10 +2,6 @@
 
 The database-free glue for multi-BungeeCord networks.
 
-**Note:** MultiBungeeGlue is still in development, which means there is verbose logging, irrelevant stacktraces, and constant changes.
-
-- [Download](https://raw.githubusercontent.com/timmyrs/MultiBungeeGlue/master/MultiBungeeGlue.jar)
-
 ## Installation
 
 For each BungeeCord server:
@@ -40,11 +36,11 @@ Connects the player to the lobby server as defined by `commands.lobbyServer` in 
 
 ### `/mtell`
 
-**Alias:** `/mwhisper`, `/mw`
+**Alias:** `/mwhisper`, `/mmsg`, `/mw`
 
 Sends a private message to a player on the network.
 
-You can also use `/tell`, `/whisper`, and `/w` if `commands.aliasTell` is set to `true` in the config.yml.
+You can also use `/tell`, `/whisper`, `/msg`, and `/w` if `commands.aliasTell` is set to `true` in the config.yml.
 
 ### `/mreply`
 

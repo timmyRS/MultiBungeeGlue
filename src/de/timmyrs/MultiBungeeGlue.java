@@ -37,6 +37,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.security.InvalidAlgorithmParameterException;
 import java.security.InvalidKeyException;
@@ -539,9 +540,13 @@ class Connection extends Thread
 			}
 			while(!this.isInterrupted());
 		}
-		catch(IOException | NoSuchAlgorithmException | NoSuchPaddingException | InvalidKeyException | InvalidAlgorithmParameterException e)
+		catch(NoSuchAlgorithmException | NoSuchPaddingException | InvalidKeyException | InvalidAlgorithmParameterException e)
 		{
 			e.printStackTrace();
+		}
+		catch(IOException ignored)
+		{
+
 		}
 		finally
 		{
@@ -900,9 +905,12 @@ class ConnectionMaintainer extends Thread
 							MultiBungeeGlue.connections.add(new Connection(ip, new Socket(ip, MultiBungeeGlue.config.getShort("communication.port")), false));
 						}
 					}
-					catch(IOException | NoSuchAlgorithmException | NoSuchPaddingException | InvalidKeyException | InvalidAlgorithmParameterException e)
+					catch(NoSuchAlgorithmException | NoSuchPaddingException | InvalidKeyException | InvalidAlgorithmParameterException | UnknownHostException e)
 					{
 						e.printStackTrace();
+					}
+					catch(IOException ignored)
+					{
 					}
 				}
 				final ArrayList<Connection> connections;
@@ -1161,7 +1169,7 @@ class CommandTell extends Command
 {
 	CommandTell(boolean aliasTell)
 	{
-		super("mtell", "multibungeeglue.command.tell", aliasTell ? new String[]{"mwhisper", "mw", "tell", "whisper", "w"} : new String[]{"mwhisper", "mw"});
+		super("mtell", "multibungeeglue.command.tell", aliasTell ? new String[]{"mwhisper", "mmsg", "mw", "tell", "msg", "whisper", "w"} : new String[]{"mwhisper", "mmsg", "mw"});
 	}
 
 	@Override
@@ -1194,8 +1202,18 @@ class CommandTell extends Command
 				c.flush();
 				if(s instanceof ProxiedPlayer)
 				{
-					//noinspection ConstantConditions
-					GluedPlayer.get(((ProxiedPlayer) s).getUniqueId()).lastTold = p.name;
+					synchronized(MultiBungeeGlue.players)
+					{
+						final GluedPlayer _p = GluedPlayer.get(((ProxiedPlayer) s).getUniqueId());
+						if(_p != null)
+						{
+							_p.lastTold = p.name;
+						}
+						else
+						{
+							MultiBungeeGlue.instance.getLogger().log(Level.WARNING, s.getName() + " was not found in players list");
+						}
+					}
 				}
 			}
 			catch(IOException e)

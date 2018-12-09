@@ -271,14 +271,31 @@ public class MultiBungeeGlue extends Plugin implements Listener
 	}
 
 	@EventHandler
-	public void onDisconnect(PlayerDisconnectEvent e)
+	public void onPlayerDisconnect(PlayerDisconnectEvent e)
 	{
+		final GluedPlayer p;
 		synchronized(MultiBungeeGlue.players)
 		{
-			final GluedPlayer p = GluedPlayer.get(e.getPlayer().getUniqueId());
-			if(p != null)
+			p = GluedPlayer.getLocal(e.getPlayer());
+			MultiBungeeGlue.players.remove(p);
+		}
+		if(p != null)
+		{
+			synchronized(MultiBungeeGlue.connections)
 			{
-				p.unglue();
+				for(Connection c : MultiBungeeGlue.connections)
+				{
+					try
+					{
+						c.os.write(Packet.UNGLUE_PLAYER.ordinal());
+						c.writeUUID(p.uuid);
+						c.flush();
+					}
+					catch(IOException ex)
+					{
+						ex.printStackTrace();
+					}
+				}
 			}
 		}
 	}
@@ -992,11 +1009,13 @@ class GluedPlayer
 	final UUID uuid;
 	final String name;
 	final boolean unbannable;
+	private ProxiedPlayer proxied;
 	String lastTold;
 
-	GluedPlayer(ProxiedPlayer player)
+	GluedPlayer(ProxiedPlayer p)
 	{
-		this("", player.getUniqueId(), player.getName(), player.hasPermission("multibungeeglue.unbannable"));
+		this("", p.getUniqueId(), p.getName(), p.hasPermission("multibungeeglue.unbannable"));
+		this.proxied = p;
 		synchronized(MultiBungeeGlue.connections)
 		{
 			for(Connection c : MultiBungeeGlue.connections)
@@ -1024,11 +1043,11 @@ class GluedPlayer
 			final GluedPlayer p = GluedPlayer.get(name);
 			if(p != null)
 			{
-				if(p.isLocal())
-				{
-					p.getProxied().disconnect(new ComponentBuilder("You logged in from a different location.").color(ChatColor.RED).create());
-				}
 				MultiBungeeGlue.players.remove(p);
+				if(!proxy.equals("") && p.isLocal())
+				{
+					p.getProxied().disconnect(TextComponent.fromLegacyText("§cYou are already connected to this proxy!"));
+				}
 			}
 			MultiBungeeGlue.players.add(this);
 		}
@@ -1043,33 +1062,9 @@ class GluedPlayer
 		c.flush();
 	}
 
-	void unglue()
-	{
-		synchronized(MultiBungeeGlue.connections)
-		{
-			for(Connection c : MultiBungeeGlue.connections)
-			{
-				try
-				{
-					c.os.write(Packet.UNGLUE_PLAYER.ordinal());
-					c.writeUUID(uuid);
-					c.flush();
-				}
-				catch(IOException e)
-				{
-					e.printStackTrace();
-				}
-			}
-		}
-		synchronized(MultiBungeeGlue.players)
-		{
-			MultiBungeeGlue.players.remove(this);
-		}
-	}
-
 	boolean isLocal()
 	{
-		return this.proxy.equals("");
+		return this.proxied != null;
 	}
 
 	Connection getConnection()
@@ -1117,6 +1112,21 @@ class GluedPlayer
 			for(GluedPlayer p : MultiBungeeGlue.players)
 			{
 				if(p.uuid.equals(uuid))
+				{
+					return p;
+				}
+			}
+		}
+		return null;
+	}
+
+	static GluedPlayer getLocal(ProxiedPlayer pp)
+	{
+		synchronized(MultiBungeeGlue.players)
+		{
+			for(GluedPlayer p : MultiBungeeGlue.players)
+			{
+				if(p.isLocal() && p.proxied.equals(pp))
 				{
 					return p;
 				}

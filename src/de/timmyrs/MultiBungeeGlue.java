@@ -87,6 +87,13 @@ public class MultiBungeeGlue extends Plugin implements Listener
 			}
 			configProvider = ConfigurationProvider.getProvider(YamlConfiguration.class);
 			config = configProvider.load(configFile);
+			// Convert old values
+			if(config.contains("motd.overwriteOnlinePlayers")) // 1.0.1 -> 1.1.0
+			{
+				config.set("status.override", config.getBoolean("motd.overwriteOnlinePlayers"));
+				config.set("motd", null);
+			}
+			// Provide defaults
 			if(config.contains("bungees"))
 			{
 				final List<String> bungees = config.getStringList("bungees");
@@ -139,9 +146,13 @@ public class MultiBungeeGlue extends Plugin implements Listener
 			{
 				config.set("communication.sharedSecret", "");
 			}
-			if(!config.contains("motd.overwriteOnlinePlayers"))
+			if(!config.contains("status.override"))
 			{
-				config.set("motd.overwriteOnlinePlayers", true);
+				config.set("status.override", true);
+			}
+			if(!config.contains("status.providePlayerSample"))
+			{
+				config.set("status.providePlayerSample", false);
 			}
 			if(config.contains("bannedPlayers"))
 			{
@@ -214,13 +225,33 @@ public class MultiBungeeGlue extends Plugin implements Listener
 	@EventHandler
 	public void onProxyPing(ProxyPingEvent e)
 	{
-		if(config.getBoolean("motd.overwriteOnlinePlayers"))
+		final ServerPing.Players responsePlayers = e.getResponse().getPlayers();
+		if(config.getBoolean("status.override"))
 		{
-			final ServerPing.Players responsePlayers = e.getResponse().getPlayers();
-			responsePlayers.setSample(new ServerPing.PlayerInfo[]{});
-			synchronized(players)
+			if(config.getBoolean("status.providePlayerSample"))
 			{
-				responsePlayers.setOnline(players.size());
+				ServerPing.PlayerInfo[] sample;
+				synchronized(players)
+				{
+					sample = new ServerPing.PlayerInfo[players.size()];
+					if(config.getBoolean("status.providePlayerSample"))
+					{
+						for(int i = 0; i < sample.length; i++)
+						{
+							sample[i] = new ServerPing.PlayerInfo(players.get(i).name, players.get(i).uuid);
+						}
+					}
+				}
+				responsePlayers.setOnline(sample.length);
+				responsePlayers.setSample(sample);
+			}
+			else
+			{
+				synchronized(players)
+				{
+					responsePlayers.setOnline(players.size());
+				}
+				responsePlayers.setSample(new ServerPing.PlayerInfo[0]);
 			}
 		}
 	}

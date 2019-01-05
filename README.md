@@ -79,7 +79,7 @@ You can also use `/ban` if `commands.aliasBan` is set to `true` in the config.ym
 
 **Alias:** `/mpardon`
 
-Bans the given player with an optional reason.
+Unbans the player with the given UUID.
 
 You can also use `/unban` and `/pardon` if `commands.aliasBan` is set to `true` in the config.yml.
 
